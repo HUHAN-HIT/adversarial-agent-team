@@ -19,6 +19,13 @@ Steps:
    - goal pool: feasibility, risk, impact, assumption, implementation
 5. Hand off: dispatch pro, con, the selected dimensions, optionally the cross-examiner, then the
    arbiter and scribe.
+6. Robustness when dispatching roles (never silently drop a role):
+   - Invalid YAML/JSON from a role → reject and re-prompt once with a parse nudge. If still
+     unparseable, capture the raw output as a free-text finding flagged `schema_violation` so the
+     Arbiter can discount it.
+   - Empty or runaway role → retry once, then proceed and record the missing role under the
+     report's Open Questions / known gaps.
+   - In Mode B, if a teammate stalls → reassign or proceed, noting the gap.
 
 Emit exactly this block:
 

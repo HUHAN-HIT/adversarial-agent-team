@@ -486,17 +486,33 @@ export function createEngine({ client, cfg }) {
   }
   async function cleanup(id) {
     if (!id) return;
-    try { await client.session.abort({ path: { id } }); } catch {}
+    try { await client.session.abort({ path: { id } }); } catch (e) { log("abort failed", e?.message ?? e); }
     try { await client.session.delete({ path: { id } }); } catch (e) { log("delete failed", e?.message ?? e); }
   }
   const modelFor = (role) => role.model ?? C.roleModels?.[role.name] ?? C.defaultModel;
 
-  function tryParseFindings(raw, role) {
+  function tryParse(raw, validate) {
     if (!raw || !raw.trim()) return { ok: false, errors: ["empty reply"] };
     let obj;
     try { obj = parseStructured(raw).value; }
     catch (e) { return { ok: false, errors: ["parse: " + (e?.message ?? e)] }; }
-    return validateFindings(obj, role);
+    return validate(obj);
+  }
+  function tryParseFindings(raw, role) {
+    return tryParse(raw, (o) => validateFindings(o, role));
+  }
+  // ask + 解析失败重试一次（对齐 workflow.md Robustness；reviewer/cross-examiner/arbiter 共用）。
+  // 成功 → { ok:true, value }；失败 → { ok:false, kind:"empty"|"schema_violation", detail, raw }。
+  async function askWithRetry(id, model, buildPrompt, parse, logName) {
+    const raw = await withTimeout(ask(id, model, buildPrompt()), C.perRoleTimeoutMs);
+    let parsed = parse(raw);
+    if (parsed.ok) return { ok: true, value: parsed.value };
+    log(`${logName} parse failed → retry`, parsed.errors);
+    const raw2 = await withTimeout(ask(id, model, `${REPARSE_NUDGE}\n\n${buildPrompt()}`), C.perRoleTimeoutMs);
+    parsed = parse(raw2);
+    if (parsed.ok) return { ok: true, value: parsed.value };
+    const empty = !raw2 || !raw2.trim();
+    return { ok: false, kind: empty ? "empty" : "schema_violation", detail: (parsed.errors || []).join("; "), raw: String(raw2 || raw || "").slice(0, 400) };
   }
 
   async function runReviewer(role, evidence) {
@@ -505,23 +521,14 @@ export function createEngine({ client, cfg }) {
     try {
       id = await createSession(`adv-${role.name}`);
       await injectRole(id, role.name);
-      const model = modelFor(role);
-      const raw = await withTimeout(ask(id, model, `EVIDENCE PACK:\n${evidence}\n\n${findingsInstruction(role)}`), C.perRoleTimeoutMs);
-      let parsed = tryParseFindings(raw, role);
-      if (!parsed.ok) {
-        log(`${role.name} parse failed → retry`, parsed.errors);
-        const raw2 = await withTimeout(ask(id, model, `${REPARSE_NUDGE}\n\n${findingsInstruction(role)}`), C.perRoleTimeoutMs);
-        parsed = tryParseFindings(raw2, role);
-        if (!parsed.ok) {
-          const empty = !raw2 || !raw2.trim();
-          return {
-            ok: false,
-            role: role.name,
-            gap: { kind: empty ? "empty" : "schema_violation", detail: (parsed.errors || []).join("; "), raw: String(raw2 || raw || "").slice(0, 400) },
-          };
-        }
-      }
-      return { ok: true, finding: parsed.value };
+      const r = await askWithRetry(
+        id, modelFor(role),
+        () => `EVIDENCE PACK:\n${evidence}\n\n${findingsInstruction(role)}`,
+        (raw) => tryParseFindings(raw, role),
+        role.name,
+      );
+      if (!r.ok) return { ok: false, role: role.name, gap: { kind: r.kind, detail: r.detail, raw: r.raw } };
+      return { ok: true, finding: r.value };
     } catch (e) {
       return { ok: false, role: role.name, gap: { kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
     } finally {
@@ -534,13 +541,14 @@ export function createEngine({ client, cfg }) {
     try {
       id = await createSession("adv-cross-examiner");
       await injectRole(id, "cross-examiner");
-      const payload = `EVIDENCE PACK:\n${evidence}\n\nALL REVIEWER FINDINGS:\n${serializeFindings(findings)}\n\n${crossExamInstruction()}`;
-      const raw = await withTimeout(ask(id, modelFor({ name: "cross-examiner" }), payload), C.perRoleTimeoutMs);
-      let v;
-      try { v = validateCrossExam(parseStructured(raw).value); }
-      catch (e) { v = { ok: false, errors: [String(e?.message ?? e)] }; }
-      if (!v.ok) return { ok: false, gap: { role: "cross-examiner", kind: "schema_violation", detail: (v.errors || []).join("; "), raw: String(raw || "").slice(0, 400) } };
-      return { ok: true, value: v.value };
+      const r = await askWithRetry(
+        id, modelFor({ name: "cross-examiner" }),
+        () => `EVIDENCE PACK:\n${evidence}\n\nALL REVIEWER FINDINGS:\n${serializeFindings(findings)}\n\n${crossExamInstruction()}`,
+        (raw) => tryParse(raw, validateCrossExam),
+        "cross-examiner",
+      );
+      if (!r.ok) return { ok: false, gap: { role: "cross-examiner", kind: r.kind, detail: r.detail, raw: r.raw } };
+      return { ok: true, value: r.value };
     } catch (e) {
       return { ok: false, gap: { role: "cross-examiner", kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
     } finally {
@@ -553,13 +561,14 @@ export function createEngine({ client, cfg }) {
     try {
       id = await createSession("adv-arbiter");
       await injectRole(id, "arbiter");
-      const payload = `REVIEWER FINDINGS:\n${serializeFindings(findings)}${crossExam ? `\n\nCROSS-EXAMINATION:\n${JSON.stringify(crossExam, null, 2)}` : ""}\n\n${arbitrationInstruction()}`;
-      const raw = await withTimeout(ask(id, modelFor({ name: "arbiter" }), payload), C.perRoleTimeoutMs);
-      let v;
-      try { v = validateArbitration(parseStructured(raw).value); }
-      catch (e) { v = { ok: false, errors: [String(e?.message ?? e)] }; }
-      if (!v.ok) return { ok: false, gap: { role: "arbiter", kind: "schema_violation", detail: (v.errors || []).join("; "), raw: String(raw || "").slice(0, 400) } };
-      return { ok: true, value: v.value };
+      const r = await askWithRetry(
+        id, modelFor({ name: "arbiter" }),
+        () => `REVIEWER FINDINGS:\n${serializeFindings(findings)}${crossExam ? `\n\nCROSS-EXAMINATION:\n${JSON.stringify(crossExam, null, 2)}` : ""}\n\n${arbitrationInstruction()}`,
+        (raw) => tryParse(raw, validateArbitration),
+        "arbiter",
+      );
+      if (!r.ok) return { ok: false, gap: { role: "arbiter", kind: r.kind, detail: r.detail, raw: r.raw } };
+      return { ok: true, value: r.value };
     } catch (e) {
       return { ok: false, gap: { role: "arbiter", kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
     } finally {
