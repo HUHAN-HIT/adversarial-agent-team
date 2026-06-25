@@ -286,7 +286,7 @@ visible to you. Your independence is structural, not a self-check.
 ## 8. 与 skill 集成（Mode C2）
 
 1. **`references/opencode-adapter.md`**：新增 "Mode C2 — Native Team Plugin"，给检测逻辑：
-   - 检测 `.opencode/plugins/adversarial-team.js` 存在 + 启动日志含工具注册 → 用 Mode C2（真团队）；
+   - 检测 `.opencode/plugin/adversarial-team.js` 存在 + 启动日志含工具注册 → 用 Mode C2（真团队）；
    - 否则回退 Mode C（subagent）/ Mode D。
 2. **`SKILL.md` 模式表**：把 OpenCode 行拆成 `C — subagents` 与 `C2 — native team plugin`，C2 对标 Claude Code 的 Mode B（真团队，独立 context）。
 3. **顺带修上轮两个 bug**（**独立 PR，先于 C2 合并**）：
@@ -372,7 +372,7 @@ M0 探针脚本（附录 C）必须先验证上述 GATE 项全过（或落入退
 
 ## 12. 测试与验证
 1. **探针**（M0，go/no-go gate）：附录 C 的脚本验证 V1–V10。GATE 判定（与 §10「GATE 逻辑汇总」一致）：**V4/V7/V8 必过**（无退路，不过则回设计）；**V6** 不过则强制走 fenced-YAML 退路（返工，不回设计）；**V1∨V2 至少一过**（都不过则角色注入无路，回设计）。
-2. **单测**：mock `client`，验证 fan-out 起 N 个 session、注入顺序、json_schema 装配、gaps 降级、cleanup。
+2. **单测**：mock `client`，验证 fan-out 起 N 个 session、注入顺序、fenced 输出解析、gaps 降级、cleanup。
 3. **集成**：拿一个小 diff 跑 Minimal，确认 2 个 reviewer 在不同 session、findings 合法、lead 能仲裁。
 4. **独立性回归（C1）**：plugin 支持 **debug 模式**（cfg.debug=true），落盘每次 `session.prompt` 的实际 parts 到 `.opencode/adversarial-team-log/`。测试断言：传给 reviewer B 的 prompt 文本中，不含 reviewer A 的 `claims` / `summary` 内容（grep 断言）。这是机制级断言，不靠黑盒猜测。
 5. **skill Pre-use Verification**：补 C2 条目。

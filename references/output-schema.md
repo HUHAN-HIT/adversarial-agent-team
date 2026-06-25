@@ -18,7 +18,7 @@ evidence:
   docs:
   links:
 known_unknowns:   # includes anything omitted when chunking/sampling large input
-mode: A | B | C | D
+mode: A | B | C | C2 | D
 review_size: minimal | standard | full
 roles_selected:   # list of role names dispatched
 ```

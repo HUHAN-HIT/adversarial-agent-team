@@ -47,6 +47,7 @@ selection, and robustness rules. Follow it — do not invent your own flow.
 | A — subagents (default) | Claude Code | Most reviews; genuine independence, lower cost |
 | B — agent teams | Claude Code (experimental) | High-stakes live debate; ~3–10× the tokens of A |
 | C — subagents | OpenCode | Most reviews on OpenCode |
+| C2 — native team plugin | OpenCode | True isolated-session fan-out through the bundled plugin |
 | D — single context (degraded) | Codex / plain chat | Fallback only; independence is *partial* |
 
 In **Mode D**, independence is enforced by the orchestrator (it withholds prior outputs) and the
@@ -72,6 +73,8 @@ valid size — it has nothing to argue against.)
 - `references/example.md` — one end-to-end worked review (evidence → findings → decision → report).
 - `references/claude-code-adapter.md` — map roles to Claude Code subagents / agent teams.
 - `references/opencode-adapter.md` — map roles to OpenCode agents (note the `mode`/tools rules).
+- `references/opencode-native-team-plugin-design.md` — Mode C2 plugin design and verified OpenCode
+  SDK assumptions.
 
 ## Installation
 
@@ -82,6 +85,10 @@ interchangeable — different frontmatter; see the adapters):
   comma-separated list.
 - **OpenCode:** copy `assets/opencode/agents/*.md` into `.opencode/agents/`. Each file **must** keep
   `mode: subagent`; `tools` is an enable/disable map, not a list.
+- **OpenCode C2 plugin:** copy `assets/opencode/plugin/adversarial-team.js` and
+  `assets/opencode/plugin/adversarial-engine.mjs` into `.opencode/plugin/` together. C2 reviewers
+  run in isolated sessions; reviewer read-only behavior is a prompt constraint, not a filesystem
+  permission boundary.
 
 `cross-examiner.md` ships in both folders but the Coordinator only invokes it at Full size.
 
@@ -95,6 +102,10 @@ These checks pin the version-sensitive assumptions that "copy-ready" depends on:
   valid findings YAML block.
 - **OpenCode:** install one `mode: subagent` agent; confirm it is hidden from the Tab switcher and
   dispatchable via `@mention`.
+- **OpenCode C2 plugin:** confirm the `adversarial_review` tool registers, run a tiny Minimal
+  review, and verify it creates separate reviewer sessions plus schema-valid findings. If
+  `debug:true` is configured, inspect `.opencode/adversarial-team-log/` and confirm reviewer prompt
+  logs contain the evidence pack but not other reviewers' findings.
 - **Docs:** confirm the two adapter URLs resolve (agent teams is experimental; paths can move).
 
 ## Common Mistakes

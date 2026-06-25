@@ -4,7 +4,12 @@ OpenCode has **primary agents** and **subagents**, configured in `opencode.json`
 files. Project agents live in `.opencode/agents/`; global in `~/.config/opencode/agents/`. The
 **filename is the agent name** — there is no `name:` field.
 
-Copy `assets/opencode/agents/*.md` into one of those directories.
+Mode C uses those agent files directly. Mode C2 uses the bundled native team plugin instead: copy
+`assets/opencode/plugin/adversarial-team.js` and
+`assets/opencode/plugin/adversarial-engine.mjs` into `.opencode/plugin/` together, then confirm the
+`adversarial_review` tool registers in the OpenCode session.
+
+Copy `assets/opencode/agents/*.md` into one of the agent directories only when using Mode C.
 
 ## Two critical differences from Claude Code
 
@@ -45,6 +50,21 @@ For finer control, use `permission:` (e.g. `edit: deny`, `bash: { "*": ask, "git
    `@adversarial-con review this diff`.
 3. The arbiter consumes those findings.
 4. The scribe writes the final report.
+
+## Dispatch pattern (Mode C2 native team plugin)
+
+1. The lead builds the evidence pack and selects roles using `workflow.md`.
+2. The lead calls `adversarial_review` with the evidence, role list, and review size.
+3. The plugin creates isolated reviewer sessions, injects role prompts, collects schema-valid
+   findings, and for Standard/Full runs an independent arbiter by default.
+4. The lead renders the report from `findings`, optional `crossExam`, `arbitration`, and `gaps`.
+
+C2 gives structural session isolation between reviewers, but reviewer read-only behavior is still a
+soft prompt constraint. It is not a filesystem permission boundary.
+
+When `debug:true` is configured in `.opencode/adversarial-team.json`, the plugin writes prompt
+records to `.opencode/adversarial-team-log/`. Use those logs to verify that each reviewer prompt
+contains the evidence pack and role instructions, but not other reviewers' findings.
 
 ## Reference
 

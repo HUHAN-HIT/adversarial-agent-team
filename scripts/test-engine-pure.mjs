@@ -1,16 +1,24 @@
 // Offline 纯函数自检（无需 opencode server）：解析器 + 校验器。
 // 用法: node scripts/test-engine-pure.mjs
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  SCHEMA_ENUMS,
   parseStructured,
   parseYamlSubset,
   validateFindings,
   validateCrossExam,
   validateArbitration,
   ROLE_PROMPTS,
+  createEngine,
 } from "../assets/opencode/plugin/adversarial-engine.mjs";
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error("  ✗ FAIL:", msg); } };
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(scriptDir, "..");
 
 // 1) JSON 块（fenced ```json）
 {
@@ -95,6 +103,90 @@ const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error("
   const missing = required.filter((r) => !ROLE_PROMPTS[r]);
   ok(missing.length === 0, `ROLE_PROMPTS missing: ${missing.join(",")}`);
   ok(!ROLE_PROMPTS.coordinator && !ROLE_PROMPTS.scribe, "coordinator/scribe NOT in ROLE_PROMPTS (D6/D8)");
+}
+
+// 8) Reference drift guards: docs and embedded runtime contracts must mention the same role/schema surface.
+{
+  const rolesDoc = await readFile(join(repoRoot, "references", "roles.md"), "utf8");
+  const schemaDoc = await readFile(join(repoRoot, "references", "output-schema.md"), "utf8");
+  const expectedRoles = Object.keys(ROLE_PROMPTS);
+  const missingRoles = expectedRoles.filter((r) =>
+    !rolesDoc.includes(r) &&
+    !(r === "pro" && rolesDoc.includes("Pro Agent")) &&
+    !(r === "con" && rolesDoc.includes("Con Agent")) &&
+    !(r === "cross-examiner" && rolesDoc.includes("Cross-Examiner"))
+  );
+  ok(missingRoles.length === 0, `roles.md missing ROLE_PROMPTS entries: ${missingRoles.join(",")}`);
+  for (const [name, values] of Object.entries(SCHEMA_ENUMS)) {
+    const missing = values.filter((v) => !schemaDoc.includes(v));
+    ok(missing.length === 0, `output-schema.md missing ${name} enum values: ${missing.join(",")}`);
+  }
+  ok(schemaDoc.includes("mode: A | B | C | C2 | D"), "output-schema evidence pack includes Mode C2");
+}
+
+// 9) Debug prompt logging records prompts only and preserves reviewer-output isolation evidence.
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "adv-engine-"));
+  const logDir = join(tempDir, "logs");
+  let sessionSeq = 0;
+  const client = {
+    session: {
+      create: async () => ({ data: { id: `s${++sessionSeq}` } }),
+      prompt: async ({ body }) => {
+        if (body.noReply) return { data: { parts: [] } };
+        const prompt = body.parts?.[0]?.text || "";
+        const agent = prompt.includes("agent: con") ? "con" : "pro";
+        const claim = agent === "con" ? "con-only-output-claim" : "pro-only-output-claim";
+        return {
+          data: {
+            parts: [{
+              type: "text",
+              text: [
+                "```yaml",
+                `agent: ${agent}`,
+                `stance: ${agent}`,
+                `summary: ${agent} summary`,
+                "claims:",
+                "  - id: C1",
+                `    claim: ${claim}`,
+                "    evidence: mocked evidence",
+                "    severity: low",
+                "    confidence: high",
+                "```",
+              ].join("\n"),
+            }],
+          },
+        };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => ({}),
+      delete: async () => ({}),
+    },
+  };
+  const engine = createEngine({
+    client,
+    cfg: {
+      defaultModel: { providerID: "mock", modelID: "mock" },
+      roleModels: {},
+      maxParallel: 2,
+      perRoleTimeoutMs: 1000,
+      independentArbiter: false,
+      debug: true,
+      debugPromptLogDir: logDir,
+    },
+  });
+  const out = await engine.runReview({
+    evidence: "target_type: code\ntarget_summary: debug isolation check",
+    roles: [{ name: "pro", stance: "pro" }, { name: "con", stance: "con" }],
+    size: "minimal",
+  });
+  ok(out.findings.length === 2, "mock review produced two findings");
+  const files = await readdir(logDir);
+  const combined = (await Promise.all(files.map((f) => readFile(join(logDir, f), "utf8")))).join("\n");
+  ok(files.length >= 4, `debug prompt log wrote inject+ask records (got ${files.length})`);
+  ok(combined.includes("debug isolation check"), "debug prompt log contains evidence prompt");
+  ok(!combined.includes("pro-only-output-claim") && !combined.includes("con-only-output-claim"), "debug prompt log excludes reviewer outputs");
+  await rm(tempDir, { recursive: true, force: true });
 }
 
 console.log(`\n=== engine pure self-test: ${pass} passed, ${fail} failed ===`);

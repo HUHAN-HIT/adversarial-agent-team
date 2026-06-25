@@ -18,7 +18,7 @@
 //   - reviewer 只读 = 软约束（V10 假阳性）；session 间 API 级隔离成立（V8 PASS）
 // ---------------------------------------------------------------------------
 
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // ============================ 枚举（对接 output-schema.md）====================
@@ -27,6 +27,13 @@ const CONFIDENCE = ["high", "medium", "low"];
 const STANCE = ["pro", "con", "dimension"];
 const DECISION = ["accept", "accept_with_conditions", "revise", "block", "investigate"];
 const RISK = ["critical", "high", "medium", "low"];
+export const SCHEMA_ENUMS = Object.freeze({
+  severity: SEVERITY,
+  confidence: CONFIDENCE,
+  stance: STANCE,
+  decision: DECISION,
+  risk_level: RISK,
+});
 
 // ============================ C2 专属 shared contract（设计 §6.6 / B1）========
 // 注意：剔除了 roles.md 的「In Mode D ...」条款，换成 C2 专属声明，避免 reviewer
@@ -401,6 +408,7 @@ export async function loadConfig({ directory } = {}) {
     perRoleTimeoutMs: 180000,
     independentArbiter: "auto", // auto = minimal→false, standard/full→true（D6）
     debug: false,
+    debugPromptLogDir: directory ? join(directory, ".opencode", "adversarial-team-log") : null,
   };
   if (!directory) return defaults;
   try {
@@ -434,8 +442,27 @@ export function serializeFindings(findings) {
 export function createEngine({ client, cfg }) {
   const C = { ...cfg };
   const log = (...a) => { if (C.debug) console.error("[adv-engine]", ...a); };
+  let promptLogSeq = 0;
 
   const sid = (res) => res?.data?.id ?? res?.id ?? res?.info?.id ?? res?.data?.info?.id ?? null;
+  const safeName = (s) => String(s || "unknown").replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 80);
+
+  async function logPromptBody(id, kind, body) {
+    if (!C.debug || !C.debugPromptLogDir) return;
+    try {
+      await mkdir(C.debugPromptLogDir, { recursive: true });
+      const seq = String(++promptLogSeq).padStart(3, "0");
+      const file = join(C.debugPromptLogDir, `${seq}-${safeName(id)}-${safeName(kind)}.json`);
+      await writeFile(file, JSON.stringify({
+        kind,
+        sessionId: id,
+        createdAt: new Date().toISOString(),
+        body,
+      }, null, 2), "utf8");
+    } catch (e) {
+      log("prompt debug logging failed", e?.message ?? e);
+    }
+  }
 
   function collectText(parts) {
     if (!Array.isArray(parts)) return "";
@@ -474,14 +501,15 @@ export function createEngine({ client, cfg }) {
   async function injectRole(id, roleName) {
     const sys = ROLE_PROMPTS[roleName];
     if (!sys) throw new Error("unknown role: " + roleName);
-    await client.session.prompt({
-      path: { id },
-      body: { noReply: true, parts: [{ type: "text", text: `${SHARED_CONTRACT_C2}\n\n${sys}` }] },
-    });
+    const body = { noReply: true, parts: [{ type: "text", text: `${SHARED_CONTRACT_C2}\n\n${sys}` }] };
+    await logPromptBody(id, `inject-${roleName}`, body);
+    await client.session.prompt({ path: { id }, body });
   }
   // 步骤3：给 evidence + 出 fenced findings。读 res.data.parts 文本（无 structured_output）。
   async function ask(id, model, text) {
-    const res = await client.session.prompt({ path: { id }, body: { model, parts: [{ type: "text", text }] } });
+    const body = { model, parts: [{ type: "text", text }] };
+    await logPromptBody(id, "ask", body);
+    const res = await client.session.prompt({ path: { id }, body });
     return readReply(id, res);
   }
   async function cleanup(id) {
