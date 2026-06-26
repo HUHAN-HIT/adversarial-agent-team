@@ -62,6 +62,25 @@ Size by **blast radius and reversibility**, not target size. A one-line change t
 | plan / strategy / decision | feasibility, risk, impact, assumption; +implementation if execution-heavy |
 | mixed (e.g. a refactor that enables a new product direction) | pull from both pools — e.g. architecture (code) + feasibility (goal) |
 
+## Plan Loop — self-closing plan mode (optional)
+
+Use this mode when the user asks the skill to produce a high-quality plan, not merely critique an
+existing target. It is a bounded two-stage capability:
+
+1. `solution-designer` produces an `InitialPlan` from the goal, evidence, and constraints.
+2. The initial plan is reviewed with this same adversarial-agent-team protocol as
+   `target_type: plan` with `review_purpose: plan_loop_review`, `plan_loop_depth: 1`, and
+   `allow_plan_loop: false`.
+3. The Arbiter decides whether the plan is acceptable, requires revision, is blocked, or needs
+   investigation.
+4. `plan-synthesizer` runs only for `accept`, `accept_with_conditions`, or `revise`, and produces an
+   `AcceptedPlan` that covers every `required_change` with `RC1`, `RC2`, ... ids.
+5. If the Arbiter decides `block` or `investigate`, no accepted plan is synthesized. Return
+   `blocked_reason` or `investigation_plan` with the raw review artifacts.
+
+This is not hidden inside normal arbitration. A Plan Loop result must expose `initialPlan`,
+`review`, `arbitration`, and either `acceptedPlan` or a blocked/investigation state. It must not
+recursively generate another plan loop.
 ## Phase 1 — Intake
 
 Identify: target type, review scope, success criteria, required output format, risk tolerance, and

@@ -54,6 +54,17 @@ Why the decision follows from the evidence. Label any arbiter-discovered gaps.
 ## Required Changes
 Changes required before approval (the blockers and their fixes).
 
+## Plan Loop
+<!-- Conditional: render only when adversarial_plan_loop was explicitly run. Do not invent plan artifacts. -->
+- Initial Plan ID:
+- Plan Review Decision: # accept | accept_with_conditions | revise | block | investigate
+- Accepted Plan ID:     # omit when blocked/investigate
+- Blocked / Investigation State:
+- Verification Commands:
+- Residual Risks:
+
+This verdict applies to the generated plan. It preserves the source review decision and does not
+prove any implementation has already been completed.
 ## Remediation Plan
 <!-- Conditional: render only when a repairPlan was explicitly produced. Do not invent one. -->
 - Plan ID:

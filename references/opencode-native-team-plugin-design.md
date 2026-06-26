@@ -125,7 +125,7 @@ lead 或独立 scribe session → 渲染 report-template.md
 - **决策：** plugin 内置 `roles.md` 的副本（含每个角色的 systemPrompt 段落），lead 调用工具时只传角色**短名**（`"con"` / `"security-reviewer"`），plugin 自己查表注入。
 - **理由：** lead 是 LLM，让它把 `roles.md` 整段复制到 `systemPrompt` 字段里易被截断/改写，且破坏单一来源。短名调用既稳又省 token。
 - **同步约束：** plugin 内置副本与 `references/roles.md` 是**镜像关系**——改一处必须改另一处。与 §8 第4项的 schema 同步规则一致：在两份文件顶部加注释互指。
-- **`ROLE_PROMPTS` 必须覆盖的短名**（独立 session 会注入的角色）：`pro`、`con`、12 个维度（code 池 7：`correctness-reviewer`/`security-reviewer`/`test-reviewer`/`architecture-reviewer`/`performance-reviewer`/`ops-reviewer`/`ux-api-reviewer`；goal 池 5：`feasibility-reviewer`/`risk-reviewer`/`impact-reviewer`/`assumption-reviewer`/`implementation-reviewer`）、`cross-examiner`、`arbiter`。`coordinator` 与 `scribe` 由 lead 主 session 担任（D6/D8），**不进** `ROLE_PROMPTS`。
+- **`ROLE_PROMPTS` 必须覆盖的短名**（独立 session 会注入的角色）：`pro`、`con`、`solution-designer`、`plan-synthesizer`、`repair-planner`、12 个维度（code 池 7：`correctness-reviewer`/`security-reviewer`/`test-reviewer`/`architecture-reviewer`/`performance-reviewer`/`ops-reviewer`/`ux-api-reviewer`；goal 池 5：`feasibility-reviewer`/`risk-reviewer`/`impact-reviewer`/`assumption-reviewer`/`implementation-reviewer`）、`cross-examiner`、`arbiter`。`coordinator` 与 `scribe` 由 lead 主 session 担任（D6/D8），**不进** `ROLE_PROMPTS`。
 
 ### D8 — Scribe 默认由 lead 担任，去掉独立 scribe session
 - **决策：** scribe 永远是 lead 自己，不在 plugin 内起独立 scribe session。
@@ -189,7 +189,33 @@ args:
 
 每个 `Gap` 形如 `{ role: string, kind: "timeout"|"empty"|"schema_violation"|"error", detail: string }`。
 
-### 6.4 工具：`adversarial_cross_exam`（可选，也可内联进上面）
+
+### 6.3a 工具：`adversarial_plan_loop`（自闭环方案生成）
+```
+args:
+  goal:       string
+  evidence:   string
+  constraints?: string
+  roles?:     JSON string of role[]
+  size?:      "minimal"|"standard"|"full"
+  crossExam?: boolean
+返回: JSON 字符串
+  { initialPlan,
+    review: { findings, crossExam?, arbitration },
+    acceptedPlan?,
+    blocked_reason?,
+    investigation_plan?,
+    plan_loop_depth: 1,
+    allow_plan_loop: false,
+    gaps,
+    run_status }
+```
+
+该工具不是 `adversarial_review` 的隐藏一键变体。它先由 `solution-designer` 产出
+`InitialPlan`，再把该计划作为 `target_type: plan` 进行有界团队审视，最后仅在
+`accept` / `accept_with_conditions` / `revise` 时由 `plan-synthesizer` 输出 `AcceptedPlan`。
+`block` / `investigate` 不运行 synthesizer，也不递归生成下一层 plan。
+### 6.4 工具：dversarial_cross_exam（可选，也可内联进上面）
 ```
 args: { proFinding, conFinding, dimensionFindings[] }
 返回: CrossExam(JSON)   # 见 6.5；起一个独立 cross-examiner session，喂各方 findings

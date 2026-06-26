@@ -90,6 +90,67 @@ arbiter_discovered_gaps:     # new issues not raised by any reviewer (may be emp
 reasoning:
 ```
 
+## Initial Plan (Solution Designer, Plan Loop only)
+
+```yaml
+plan_id:                         # stable id, e.g. IP1
+goal:
+assumptions:
+steps:
+  - id: S1
+    action:
+    rationale:
+    owner:
+    depends_on:
+validation:
+risks:
+open_questions:
+```
+
+This is a candidate plan, not an accepted plan. It must be reviewed as `target_type: plan` before
+being synthesized into an `AcceptedPlan`.
+
+## Accepted Plan (Plan Synthesizer, Plan Loop only)
+
+```yaml
+plan_id:                         # stable id, e.g. AP1
+source_initial_plan_id:
+source_decision: accept | accept_with_conditions | revise
+decision_preserved: true
+changes_applied:
+  - required_change_id: RC1
+    change:
+final_steps:
+  - id: S1
+    action:
+    rationale:
+verification_commands:
+residual_risks:
+```
+
+`AcceptedPlan` is allowed only when plan-review arbitration is `accept`, `accept_with_conditions`,
+or `revise`. It is forbidden for `block` and `investigate`; those return `blocked_reason` or
+`investigation_plan` instead.
+
+## Plan Loop Result (tool envelope)
+
+```yaml
+initialPlan:                     # Initial Plan schema
+review:
+  findings:                      # Findings[] from plan review
+  crossExam:                     # optional Cross-Examination
+  arbitration:                   # Arbitration over the plan
+acceptedPlan:                    # Accepted Plan schema, only when synthesis is allowed
+blocked_reason:                  # present instead of acceptedPlan for block/failure
+investigation_plan:              # present instead of acceptedPlan for investigate
+plan_loop_depth: 1
+allow_plan_loop: false
+gaps:
+run_status:
+```
+
+Plan Loop is bounded. It must not automatically produce a plan-of-plan or recurse into another
+planning pass.
 ## Remediation Plan (Repair Planner, conditional after Phase 5)
 
 ```yaml

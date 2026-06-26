@@ -111,6 +111,33 @@ Output: arbitration block.
 
 ---
 
+## Solution Designer (`solution-designer`)
+
+Produce an implementation-quality `InitialPlan` before adversarial review when the user asks for a
+self-closing plan rather than only a critique.
+
+- Turn the goal, evidence, and constraints into concrete sequenced steps.
+- State assumptions, validation, risks, and open questions explicitly.
+- Do not claim the plan is accepted; it must still pass adversarial review and arbitration.
+- Do not hide uncertainty. If evidence is missing, expose it as an open question or validation need.
+
+Output: initial-plan block.
+
+---
+
+## Plan Synthesizer (`plan-synthesizer`)
+
+Produce an `AcceptedPlan` only after plan review arbitration permits synthesis.
+
+- Apply every `required_change` from the plan-review Arbiter using `RC1`, `RC2`, ... ids.
+- Preserve the source arbitration decision; accepting the plan does not change the original target
+  decision.
+- Do not start another plan loop, generate a plan-of-plan, or call the repair planner for this plan.
+- If the plan-review decision is `block` or `investigate`, this role must not run.
+
+Output: accepted-plan block.
+
+---
 ## Repair Planner (`repair-planner`)
 
 Convert an arbitration result into a bounded remediation plan. This role runs only after Arbitration
@@ -137,7 +164,7 @@ Write the final report from `report-template.md`.
 - List findings by severity; include decision, risk, confidence, required changes, optional
   improvements, and open questions.
 - Generate the Dimension Reviews section dynamically from whatever dimensions ran.
-- Render supplied `repairPlan` and `repairPlanReview` when present; if absent, do not invent them.
+- Render supplied `initialPlan`, `planReview`, `acceptedPlan`, `repairPlan`, and `repairPlanReview` when present; if absent, do not invent them.
 - In Mode D, add the top-of-report callout and cap the report's overall confidence at `medium`.
 
 Output: the rendered report (Markdown).

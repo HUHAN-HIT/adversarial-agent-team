@@ -35,9 +35,10 @@ agents adds cost and noise.
 2. **Pro / Con / dimension reviewers** run independently and emit structured findings.
 3. **Cross-examiner** (Full size / high-stakes) compares claims and flags unresolved disputes.
 4. **Arbiter** weighs evidence and decides.
-5. **Repair Planner** optionally turns required changes into a bounded remediation plan.
-6. The remediation plan is optionally reviewed as a one-pass `target_type: plan` adversarial review.
-7. **Scribe** renders the final report.
+5. **Plan Loop** can be used when the user wants the skill to generate a plan: `solution-designer` drafts an `InitialPlan`, the team reviews it, and `plan-synthesizer` produces an `AcceptedPlan` only when arbitration permits it.
+6. **Repair Planner** optionally turns required changes into a bounded remediation plan.
+7. The remediation plan is optionally reviewed as a one-pass 	arget_type: plan adversarial review.
+8. **Scribe** renders the final report.
 
 Load **`references/workflow.md`** for the full process, the four execution modes, dimension
 selection, and robustness rules. Follow it — do not invent your own flow.
@@ -92,7 +93,7 @@ interchangeable — different frontmatter; see the adapters):
   run in isolated sessions; reviewer read-only behavior is a prompt constraint, not a filesystem
   permission boundary.
 
-`cross-examiner.md` ships in both folders but the Coordinator only invokes it at Full size. `repair-planner.md` is used only after arbitration when a bounded remediation plan is explicitly requested or required by non-empty `required_changes`.
+`cross-examiner.md` ships in both folders but the Coordinator only invokes it at Full size. `solution-designer.md` and `plan-synthesizer.md` are used only for explicit Plan Loop runs. `repair-planner.md` is used only after arbitration when a bounded remediation plan is explicitly requested or required by non-empty `required_changes`.
 
 Then launch: *"Use the adversarial-agent-team protocol on <target>."*
 
@@ -104,7 +105,7 @@ These checks pin the version-sensitive assumptions that "copy-ready" depends on:
   valid findings YAML block.
 - **OpenCode:** install one `mode: subagent` agent; confirm it is hidden from the Tab switcher and
   dispatchable via `@mention`.
-- **OpenCode C2 plugin:** confirm the `adversarial_review` tool registers, run a tiny Minimal
+- **OpenCode C2 plugin:** confirm the `adversarial_review` and `adversarial_plan_loop` tools register, run a tiny Minimal
   review, and verify it creates separate reviewer sessions plus schema-valid findings. If
   `debug:true` is configured, inspect `.opencode/adversarial-team-log/` and confirm reviewer prompt
   logs contain the evidence pack but not other reviewers' findings.

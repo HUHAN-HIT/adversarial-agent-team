@@ -54,11 +54,11 @@ For finer control, use `permission:` (e.g. `edit: deny`, `bash: { "*": ask, "git
 ## Dispatch pattern (Mode C2 native team plugin)
 
 1. The lead builds the evidence pack and selects roles using `workflow.md`.
-2. The lead calls `adversarial_review` with the evidence, role list, and review size.
+2. For normal review, the lead calls `adversarial_review` with the evidence, role list, and review size. For self-closing plan generation, the lead calls `adversarial_plan_loop` with `goal`, `evidence`, optional `constraints`, roles, and size.
 3. The plugin creates isolated reviewer sessions, injects role prompts, collects schema-valid
    findings, and for Standard/Full runs an independent arbiter by default. Recoverable role/phase
    failures may be redispatched once in a fresh session.
-4. The lead renders the report from `findings`, optional `crossExam`, `arbitration`, `gaps`, and
+4. `adversarial_plan_loop` returns `initialPlan`, a bounded `target_type: plan` review, and either `acceptedPlan` or `blocked_reason` / `investigation_plan`; it uses `plan_loop_depth: 1` and `allow_plan_loop: false` and does not recurse. The lead renders the report from `findings`, optional `crossExam`, `arbitration`, `gaps`, and
    `run_status`. If `safe_to_use_decision:false`, the report must say the decision is non-final.
 5. If arbitration has non-empty `required_changes` and the user wants a repair plan, the lead calls
    `adversarial_repair_plan` explicitly. The returned `repairPlan` is a separate artifact, not an

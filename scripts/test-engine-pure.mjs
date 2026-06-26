@@ -11,6 +11,9 @@ import {
   validateFindings,
   validateCrossExam,
   validateArbitration,
+  validateInitialPlan,
+  validateAcceptedPlan,
+  validatePlanLoopResult,
   validateRepairPlan,
   validateRepairPlanReviewResult,
   ROLE_PROMPTS,
@@ -199,7 +202,7 @@ const repoRoot = join(scriptDir, "..");
     "correctness-reviewer", "security-reviewer", "test-reviewer", "architecture-reviewer",
     "performance-reviewer", "ops-reviewer", "ux-api-reviewer",
     "feasibility-reviewer", "risk-reviewer", "impact-reviewer", "assumption-reviewer", "implementation-reviewer",
-    "repair-planner"];
+    "solution-designer", "plan-synthesizer", "repair-planner"];
   const missing = required.filter((r) => !ROLE_PROMPTS[r]);
   ok(missing.length === 0, `ROLE_PROMPTS missing: ${missing.join(",")}`);
   ok(!ROLE_PROMPTS.coordinator && !ROLE_PROMPTS.scribe, "coordinator/scribe NOT in ROLE_PROMPTS (D6/D8)");
@@ -601,6 +604,181 @@ const repoRoot = join(scriptDir, "..");
   ok(combined.includes("Fix S1"), "repair reviewer prompts include original required changes");
   ok(!combined.includes("pro-repair-review-claim") && !combined.includes("con-repair-review-claim"), "repair reviewer prompt logs exclude other reviewer outputs");
   await rm(tempDir, { recursive: true, force: true });
+}
+
+// 17) Plan Loop schema: InitialPlan, AcceptedPlan, and blocked result stay explicit and bounded.
+{
+  const initial = validateInitialPlan({
+    plan_id: "IP1",
+    goal: "Add retry-safe dispatch",
+    assumptions: ["existing queue contract stays stable"],
+    steps: [{ id: "S1", action: "Add idempotency key", rationale: "prevents duplicate writes" }],
+    validation: ["unit test duplicate delivery"],
+    risks: ["migration may expose old rows"],
+    open_questions: ["Which queues are in scope?"],
+  });
+  ok(initial.ok && initial.value.plan_id === "IP1", "InitialPlan validates");
+
+  const accepted = validateAcceptedPlan({
+    plan_id: "AP1",
+    source_initial_plan_id: "IP1",
+    source_decision: "revise",
+    decision_preserved: true,
+    changes_applied: [{ required_change_id: "RC1", change: "Add rollback step" }],
+    final_steps: [{ id: "S1", action: "Add idempotency key" }],
+    verification_commands: ["npm test"],
+    residual_risks: ["legacy rows still need audit"],
+  }, initial.value, { decision: "revise", required_changes: ["Add rollback step"] });
+  ok(accepted.ok && accepted.value.decision_preserved === true, "AcceptedPlan validates after required changes");
+
+  const blocked = validatePlanLoopResult({
+    initialPlan: initial.value,
+    review: { findings: [], arbitration: { decision: "block", required_changes: ["Need production schema"] } },
+    blocked_reason: "Missing production schema evidence",
+    plan_loop_depth: 1,
+    allow_plan_loop: false,
+    gaps: [],
+  });
+  ok(blocked.ok && !blocked.value.acceptedPlan, "PlanLoopResult supports blocked path without acceptedPlan");
+
+  const bad = validatePlanLoopResult({
+    initialPlan: initial.value,
+    review: { findings: [], arbitration: { decision: "block", required_changes: ["Need production schema"] } },
+    acceptedPlan: accepted.value,
+    plan_loop_depth: 1,
+    allow_plan_loop: false,
+    gaps: [],
+  });
+  ok(!bad.ok, "PlanLoopResult rejects acceptedPlan when review decision is block");
+}
+
+// 18) Plan Loop runtime: design -> plan review -> arbitration -> synthesis, while block skips synthesis.
+{
+  const sessions = [];
+  const prompts = [];
+  const replies = {
+    "adv-solution-designer": JSON.stringify({
+      plan_id: "IP1",
+      goal: "Ship safe change",
+      assumptions: ["repo is writable"],
+      steps: [{ id: "S1", action: "Patch code" }],
+      validation: ["npm test"],
+      risks: ["regression"],
+      open_questions: [],
+    }),
+    "adv-pro": JSON.stringify({
+      agent: "pro",
+      stance: "pro",
+      summary: "Plan is feasible.",
+      claims: [{ id: "C1", claim: "Steps are clear", evidence: "InitialPlan S1", severity: "low", confidence: "high" }],
+    }),
+    "adv-con": JSON.stringify({
+      agent: "con",
+      stance: "con",
+      summary: "Rollback is missing.",
+      claims: [{ id: "C1", claim: "No rollback", evidence: "InitialPlan lacks rollback", severity: "medium", confidence: "high" }],
+    }),
+    "adv-arbiter": JSON.stringify({
+      decision: "revise",
+      risk_level: "medium",
+      confidence: "high",
+      required_changes: ["Add rollback"],
+      optional_improvements: [],
+      residual_risks: [],
+      arbiter_discovered_gaps: [],
+      reasoning: "A small revision is required.",
+    }),
+    "adv-plan-synthesizer": JSON.stringify({
+      plan_id: "AP1",
+      source_initial_plan_id: "IP1",
+      source_decision: "revise",
+      decision_preserved: true,
+      changes_applied: [{ required_change_id: "RC1", change: "Add rollback" }],
+      final_steps: [{ id: "S1", action: "Patch code" }, { id: "S2", action: "Rollback if tests fail" }],
+      verification_commands: ["npm test"],
+      residual_risks: [],
+    }),
+  };
+  const client = {
+    session: {
+      async create({ body }) { sessions.push(body.title); return { data: { id: body.title } }; },
+      async prompt({ path, body }) {
+        prompts.push({ id: path.id, body });
+        if (body.noReply) return { data: { parts: [] } };
+        return { data: { parts: [{ type: "text", text: replies[path.id] }] } };
+      },
+      async messages() { return { data: [] }; },
+      async abort() {},
+      async delete() {},
+    },
+  };
+  const engine = createEngine({ client, cfg: { defaultModel: { providerID: "test", modelID: "test" }, roleModels: {}, maxParallel: 2, perRoleTimeoutMs: 0, maxRedispatchPerRole: 0, independentArbiter: true } });
+  const out = await engine.runPlanLoop({
+    goal: "Ship safe change",
+    evidence: "diff -- code",
+    roles: [{ name: "pro", stance: "pro" }, { name: "con", stance: "con" }],
+    size: "standard",
+    crossExam: false,
+  });
+  ok(out.acceptedPlan?.plan_id === "AP1", "runPlanLoop returns acceptedPlan on revise path");
+  ok(sessions.includes("adv-solution-designer") && sessions.includes("adv-plan-synthesizer"), "runPlanLoop uses designer and synthesizer sessions");
+  const proPrompt = prompts.find((p) => p.id === "adv-pro" && !p.body.noReply)?.body.parts[0].text || "";
+  ok(proPrompt.includes("plan_loop_depth: 1") && proPrompt.includes("allow_plan_loop: false"), "reviewer prompt carries bounded loop guard");
+  ok(proPrompt.includes("INITIAL PLAN") && !proPrompt.includes("Rollback is missing"), "reviewer sees plan but not peer outputs");
+  ok(out.run_status?.completed_phases?.includes("plan_synthesis"), "runPlanLoop run_status records synthesis completion");
+}
+
+{
+  const sessions = [];
+  const replies = {
+    "adv-solution-designer": JSON.stringify({
+      plan_id: "IP2",
+      goal: "Migrate database",
+      assumptions: [],
+      steps: [{ id: "S1", action: "Run migration" }],
+      validation: ["npm test"],
+      risks: ["data loss"],
+      open_questions: [],
+    }),
+    "adv-con": JSON.stringify({
+      agent: "con",
+      stance: "con",
+      summary: "Evidence is missing.",
+      claims: [{ id: "C1", claim: "No schema evidence", evidence: "Evidence pack omits schema", severity: "blocker", confidence: "high" }],
+    }),
+    "adv-arbiter": JSON.stringify({
+      decision: "block",
+      risk_level: "critical",
+      confidence: "high",
+      required_changes: ["Provide production schema"],
+      optional_improvements: [],
+      residual_risks: [],
+      arbiter_discovered_gaps: [],
+      reasoning: "Cannot produce an accepted plan without schema evidence.",
+    }),
+  };
+  const client = {
+    session: {
+      async create({ body }) { sessions.push(body.title); return { data: { id: body.title } }; },
+      async prompt({ path, body }) {
+        if (body.noReply) return { data: { parts: [] } };
+        return { data: { parts: [{ type: "text", text: replies[path.id] }] } };
+      },
+      async messages() { return { data: [] }; },
+      async abort() {},
+      async delete() {},
+    },
+  };
+  const engine = createEngine({ client, cfg: { defaultModel: { providerID: "test", modelID: "test" }, roleModels: {}, maxParallel: 1, perRoleTimeoutMs: 0, maxRedispatchPerRole: 0, independentArbiter: true } });
+  const out = await engine.runPlanLoop({
+    goal: "Migrate database",
+    evidence: "missing schema",
+    roles: [{ name: "con", stance: "con" }],
+    size: "standard",
+    crossExam: false,
+  });
+  ok(out.blocked_reason && !out.acceptedPlan, "runPlanLoop returns blocked reason without acceptedPlan on block");
+  ok(!sessions.includes("adv-plan-synthesizer"), "runPlanLoop does not synthesize after block");
 }
 console.log(`\n=== engine pure self-test: ${pass} passed, ${fail} failed ===`);
 process.exit(fail ? 1 : 0);

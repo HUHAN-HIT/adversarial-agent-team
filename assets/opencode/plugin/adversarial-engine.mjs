@@ -95,6 +95,17 @@ Emit a cross-exam block.`,
 - Never average opinions. One blocker can outweigh many approvals.
 Emit an arbitration block.`,
 
+  "solution-designer": `You are the Solution Designer. Produce an implementation-quality InitialPlan before review.
+- Turn the user's goal and evidence into a concrete, sequenced plan.
+- State assumptions, validation, risks, and open questions explicitly.
+- Do not claim the plan is accepted; it still requires adversarial review.
+Emit an InitialPlan block.`,
+
+  "plan-synthesizer": `You are the Plan Synthesizer. Produce an AcceptedPlan only after adversarial arbitration permits synthesis.
+- Apply every required_change from the arbiter using RC1, RC2, ... ids.
+- Preserve the source arbitration decision; plan acceptance does not change the original target decision.
+- Do not start another plan loop or ask for a repair plan for this plan.
+Emit an AcceptedPlan block.`,
   "repair-planner": `You are the Repair Planner. Convert an arbitration result and its required_changes into a bounded remediation plan.
 - Do not re-litigate the original review decision.
 - Do not place the repair plan inside the arbitration object.
@@ -179,6 +190,56 @@ reasoning: <why this decision; never average — one blocker can outweigh many a
 No prose outside the block.`;
 }
 
+function initialPlanInstruction() {
+  return `Return ONLY a single fenced code block (\`\`\`yaml; JSON also accepted). Use EXACTLY these keys:
+
+\`\`\`yaml
+plan_id: IP1
+goal: <goal this plan solves>
+assumptions:
+  - <assumption>
+steps:
+  - id: S1
+    action: <specific implementation/design action>
+    rationale: <why this step exists>
+validation:
+  - <test, command, review, or evidence check>
+risks:
+  - <risk>
+open_questions:
+  - <question, or omit the key>
+\`\`\`
+
+No prose outside the block. This is an InitialPlan, not an accepted final plan.`;
+}
+
+function acceptedPlanInstruction(initialPlan, arbitration) {
+  const required = (arbitration?.required_changes || []).map((c, i) => `RC${i + 1}: ${c}`).join("\n") || "<none>";
+  return `Return ONLY a single fenced code block (\`\`\`yaml; JSON also accepted). Use EXACTLY these keys:
+
+Required changes to cover:
+${required}
+
+\`\`\`yaml
+plan_id: AP1
+source_initial_plan_id: ${initialPlan?.plan_id || "IP1"}
+source_decision: ${arbitration?.decision || "revise"}
+decision_preserved: true
+changes_applied:
+  - required_change_id: RC1
+    change: <how the required change is applied>
+final_steps:
+  - id: S1
+    action: <final concrete action>
+    rationale: <why this action remains>
+verification_commands:
+  - <command or manual verification>
+residual_risks:
+  - <risk remaining after the plan>
+\`\`\`
+
+No prose outside the block. Do not change the source decision. Do not generate another plan loop.`;
+}
 function repairPlanInstruction() {
   return `Return ONLY a single fenced code block (\`\`\`yaml; JSON also accepted). Use EXACTLY these keys:
 
@@ -452,6 +513,121 @@ export function validateArbitration(o) {
   };
 }
 
+function normalizePlanSteps(x) {
+  return asArray(x).map((s, idx) => {
+    if (typeof s === "string") return { id: `S${idx + 1}`, action: s.trim() };
+    s = s || {};
+    const out = {
+      id: String(s.id ?? `S${idx + 1}`).trim(),
+      action: String(s.action ?? s.step ?? s.task ?? "").trim(),
+    };
+    if (s.rationale != null) out.rationale = String(s.rationale).trim();
+    if (s.owner != null) out.owner = String(s.owner).trim();
+    if (s.depends_on != null) out.depends_on = strList(s.depends_on);
+    return out;
+  }).filter((s) => s.action);
+}
+
+function normalizeChangesApplied(x) {
+  return asArray(x).map((c, idx) => {
+    if (typeof c === "string") return { required_change_id: `RC${idx + 1}`, change: c.trim() };
+    c = c || {};
+    return {
+      required_change_id: String(c.required_change_id ?? c.id ?? `RC${idx + 1}`).trim(),
+      change: String(c.change ?? c.action ?? c.summary ?? "").trim(),
+    };
+  }).filter((c) => c.change);
+}
+
+export function validateInitialPlan(o) {
+  if (!o || typeof o !== "object") return { ok: false, errors: ["not an object"] };
+  const errors = [];
+  const steps = normalizePlanSteps(o.steps);
+  const validation = strList(o.validation);
+  const value = {
+    plan_id: String(o.plan_id ?? "").trim(),
+    goal: String(o.goal ?? "").trim(),
+    assumptions: strList(o.assumptions),
+    steps,
+    validation,
+    risks: strList(o.risks),
+    open_questions: strList(o.open_questions),
+  };
+  if (!value.plan_id) errors.push("plan_id missing");
+  if (!value.goal) errors.push("goal missing");
+  if (!steps.length) errors.push("steps empty/missing");
+  if (!validation.length) errors.push("validation empty/missing");
+  return errors.length ? { ok: false, errors } : { ok: true, value };
+}
+
+export function validateAcceptedPlan(o, initialPlan, arbitration) {
+  if (!o || typeof o !== "object") return { ok: false, errors: ["not an object"] };
+  const errors = [];
+  const final_steps = normalizePlanSteps(o.final_steps ?? o.steps);
+  const verification_commands = strList(o.verification_commands ?? o.validation);
+  const changes_applied = normalizeChangesApplied(o.changes_applied);
+  const sourceDecision = coerceEnum(o.source_decision ?? arbitration?.decision, DECISION, "revise");
+  const value = {
+    plan_id: String(o.plan_id ?? "").trim(),
+    source_initial_plan_id: String(o.source_initial_plan_id ?? "").trim(),
+    source_decision: sourceDecision,
+    decision_preserved: o.decision_preserved === true || String(o.decision_preserved).toLowerCase() === "true",
+    changes_applied,
+    final_steps,
+    verification_commands,
+    residual_risks: strList(o.residual_risks),
+  };
+  if (!value.plan_id) errors.push("plan_id missing");
+  if (!value.source_initial_plan_id) errors.push("source_initial_plan_id missing");
+  if (initialPlan?.plan_id && value.source_initial_plan_id !== initialPlan.plan_id) errors.push("source_initial_plan_id does not match initial plan");
+  if (!value.decision_preserved) errors.push("decision_preserved must be true");
+  if (!final_steps.length) errors.push("final_steps empty/missing");
+  if (!verification_commands.length) errors.push("verification_commands empty/missing");
+  const required = strList(arbitration?.required_changes);
+  if (required.length) {
+    const covered = new Set(changes_applied.map((c) => c.required_change_id));
+    for (let i = 0; i < required.length; i++) {
+      if (!covered.has(`RC${i + 1}`)) errors.push(`required_change RC${i + 1} not covered`);
+    }
+  }
+  return errors.length ? { ok: false, errors } : { ok: true, value };
+}
+
+export function validatePlanLoopResult(o) {
+  if (!o || typeof o !== "object") return { ok: false, errors: ["not an object"] };
+  const errors = [];
+  if (Number(o.plan_loop_depth) !== 1) errors.push("plan_loop_depth must be 1");
+  if (o.allow_plan_loop !== false) errors.push("allow_plan_loop must be false");
+  const initial = validateInitialPlan(o.initialPlan);
+  if (!initial.ok) errors.push(...initial.errors.map((e) => `initialPlan: ${e}`));
+  const review = o.review && typeof o.review === "object" ? o.review : null;
+  if (!review) errors.push("review missing");
+  const arbitration = review?.arbitration ? validateArbitration(review.arbitration).value : null;
+  const decision = arbitration?.decision;
+  let accepted;
+  if (o.acceptedPlan) {
+    accepted = validateAcceptedPlan(o.acceptedPlan, initial.value, arbitration);
+    if (!accepted.ok) errors.push(...accepted.errors.map((e) => `acceptedPlan: ${e}`));
+  }
+  if (decision === "block" || decision === "investigate") {
+    if (o.acceptedPlan) errors.push("acceptedPlan is forbidden for block/investigate decisions");
+    if (!String(o.blocked_reason ?? "").trim() && !String(o.investigation_plan ?? "").trim()) errors.push("blocked_reason or investigation_plan required");
+  } else if (decision && !o.acceptedPlan) {
+    errors.push("acceptedPlan required when arbitration permits synthesis");
+  }
+  if (errors.length) return { ok: false, errors };
+  const value = {
+    initialPlan: initial.value,
+    review,
+    plan_loop_depth: 1,
+    allow_plan_loop: false,
+    gaps: asArray(o.gaps),
+  };
+  if (accepted?.ok) value.acceptedPlan = accepted.value;
+  if (o.blocked_reason) value.blocked_reason = String(o.blocked_reason).trim();
+  if (o.investigation_plan) value.investigation_plan = String(o.investigation_plan).trim();
+  return { ok: true, value };
+}
 function normalizeRequiredChanges(changes) {
   return strList(changes).map((text, idx) => ({ id: `RC${idx + 1}`, text }));
 }
@@ -616,6 +792,30 @@ export function serializeFindings(findings) {
     .join("\n\n");
 }
 
+const DEFAULT_PLAN_REVIEW_ROLES = [
+  { name: "pro", stance: "pro" },
+  { name: "con", stance: "con" },
+  { name: "implementation-reviewer", stance: "dimension", dimension: "implementation" },
+  { name: "risk-reviewer", stance: "dimension", dimension: "risk" },
+  { name: "assumption-reviewer", stance: "dimension", dimension: "assumption" },
+  { name: "test-reviewer", stance: "dimension", dimension: "test" },
+];
+
+function buildPlanReviewEvidence({ goal, evidence, constraints, initialPlan }) {
+  return [
+    "target_type: plan",
+    "review_purpose: plan_loop_review",
+    "plan_loop_depth: 1",
+    "allow_plan_loop: false",
+    "",
+    `GOAL:\n${goal}`,
+    constraints ? `\nCONSTRAINTS:\n${constraints}` : "",
+    `\nSOURCE EVIDENCE:\n${evidence}`,
+    `\nINITIAL PLAN:\n${JSON.stringify(initialPlan, null, 2)}`,
+    "",
+    "Review whether this plan is sufficient, feasible, testable, and unlikely to introduce new problems. Do not produce a new plan.",
+  ].filter(Boolean).join("\n");
+}
 // ============================ 引擎工厂 =======================================
 export function createEngine({ client, cfg }) {
   const C = { ...cfg };
@@ -834,6 +1034,49 @@ export function createEngine({ client, cfg }) {
     }
   }
 
+  async function runSolutionDesigner({ goal, evidence, constraints } = {}) {
+    if (!goal || !evidence) throw new Error("runSolutionDesigner: goal 与 evidence 必填");
+    let id;
+    try {
+      id = await createSession("adv-solution-designer");
+      await injectRole(id, "solution-designer");
+      const r = await askWithRetry(
+        id,
+        modelFor({ name: "solution-designer" }),
+        () => `GOAL:\n${goal}${constraints ? `\n\nCONSTRAINTS:\n${constraints}` : ""}\n\nEVIDENCE PACK:\n${evidence}\n\n${initialPlanInstruction()}`,
+        (raw) => tryParse(raw, validateInitialPlan),
+        "solution-designer",
+      );
+      if (!r.ok) return { ok: false, gap: { role: "solution-designer", kind: r.kind, detail: r.detail, raw: r.raw } };
+      return { ok: true, value: r.value };
+    } catch (e) {
+      return { ok: false, gap: { role: "solution-designer", kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
+    } finally {
+      await cleanup(id);
+    }
+  }
+
+  async function runPlanSynthesizer({ initialPlan, findings, crossExam, arbitration } = {}) {
+    if (!initialPlan || !arbitration) throw new Error("runPlanSynthesizer: initialPlan 与 arbitration 必填");
+    let id;
+    try {
+      id = await createSession("adv-plan-synthesizer");
+      await injectRole(id, "plan-synthesizer");
+      const r = await askWithRetry(
+        id,
+        modelFor({ name: "plan-synthesizer" }),
+        () => `INITIAL PLAN:\n${JSON.stringify(initialPlan, null, 2)}\n\nREVIEWER FINDINGS:\n${serializeFindings(findings || [])}${crossExam ? `\n\nCROSS-EXAMINATION:\n${JSON.stringify(crossExam, null, 2)}` : ""}\n\nARBITRATION:\n${JSON.stringify(arbitration, null, 2)}\n\nplan_loop_depth: 1\nallow_plan_loop: false\n\n${acceptedPlanInstruction(initialPlan, arbitration)}`,
+        (raw) => tryParse(raw, (o) => validateAcceptedPlan(o, initialPlan, arbitration)),
+        "plan-synthesizer",
+      );
+      if (!r.ok) return { ok: false, gap: { role: "plan-synthesizer", kind: r.kind, detail: r.detail, raw: r.raw } };
+      return { ok: true, value: r.value };
+    } catch (e) {
+      return { ok: false, gap: { role: "plan-synthesizer", kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
+    } finally {
+      await cleanup(id);
+    }
+  }
   function repairPlanRequiredIds(repairPlan) {
     return asArray(repairPlan?.source_required_changes).map((r, idx) => String(r?.id ?? `RC${idx + 1}`).trim()).filter(Boolean);
   }
@@ -1128,5 +1371,164 @@ ${repairPlanReviewArbitrationInstruction()}`,
     return { findings, crossExam: cross, arbitration, gaps, run_status };
   }
 
-  return { runReview, runReviewer, runCrossExaminer, runArbiter, runRepairPlanner, runRepairPlanReview, _internals: { sid, readReply, createSession, cleanup, modelFor } };
+  async function runPlanLoop({ goal, evidence, constraints, roles, size = "standard", crossExam } = {}) {
+    if (!goal || !evidence) throw new Error("runPlanLoop: goal 与 evidence 必填");
+    const gaps = [];
+    const redispatchAttempts = [];
+    const designed = await runWithRedispatch({
+      role: "solution-designer",
+      phase: "initial_planning",
+      attempts: redispatchAttempts,
+      run: () => runSolutionDesigner({ goal, evidence, constraints }),
+    });
+    if (!designed.ok) {
+      return {
+        initialPlan: null,
+        review: { findings: [] },
+        blocked_reason: "Solution designer did not return a valid InitialPlan.",
+        plan_loop_depth: 1,
+        allow_plan_loop: false,
+        gaps: [designed.gap],
+        run_status: {
+          status: "failed",
+          completed_phases: [],
+          incomplete_phase: "initial_planning",
+          reason: "No valid InitialPlan was produced.",
+          safe_to_use_decision: false,
+          redispatch_attempts: redispatchAttempts,
+          gaps_count: 1,
+        },
+      };
+    }
+
+    const initialPlan = designed.value;
+    const reviewRoles = Array.isArray(roles) && roles.length ? roles : DEFAULT_PLAN_REVIEW_ROLES;
+    const planEvidence = buildPlanReviewEvidence({ goal, evidence, constraints, initialPlan });
+    const review = await runReview({ evidence: planEvidence, roles: reviewRoles, size, crossExam });
+    gaps.push(...(review.gaps || []));
+    redispatchAttempts.push(...(review.run_status?.redispatch_attempts || []));
+
+    let arbitration = review.arbitration;
+    if (!arbitration && review.findings?.length) {
+      const ar = await runWithRedispatch({
+        role: "arbiter",
+        phase: "plan_loop_arbitration",
+        attempts: redispatchAttempts,
+        run: () => runArbiter(review.findings, review.crossExam),
+      });
+      if (ar.ok) arbitration = ar.value; else gaps.push(ar.gap);
+    }
+    const normalizedReview = { findings: review.findings || [], crossExam: review.crossExam, arbitration };
+    const completed = ["initial_planning"];
+    if (normalizedReview.findings.length) completed.push("plan_review");
+    if (normalizedReview.crossExam) completed.push("cross_examination");
+    if (arbitration) completed.push("arbitration");
+
+    if (!arbitration) {
+      return {
+        initialPlan,
+        review: normalizedReview,
+        blocked_reason: "Plan review did not produce arbitration; no accepted plan was synthesized.",
+        plan_loop_depth: 1,
+        allow_plan_loop: false,
+        gaps,
+        run_status: {
+          status: "incomplete",
+          completed_phases: completed,
+          incomplete_phase: "arbitration",
+          reason: "Plan Loop stopped before synthesis because arbitration is missing.",
+          safe_to_use_decision: false,
+          redispatch_attempts: redispatchAttempts,
+          gaps_count: gaps.length,
+        },
+      };
+    }
+    if (arbitration.decision === "block") {
+      return {
+        initialPlan,
+        review: normalizedReview,
+        blocked_reason: arbitration.reasoning || "Arbiter blocked the initial plan.",
+        plan_loop_depth: 1,
+        allow_plan_loop: false,
+        gaps,
+        run_status: {
+          status: gaps.length ? "completed_with_gaps" : "completed",
+          completed_phases: completed,
+          incomplete_phase: null,
+          reason: "Plan Loop produced a blocked result; no AcceptedPlan was synthesized.",
+          safe_to_use_decision: true,
+          redispatch_attempts: redispatchAttempts,
+          gaps_count: gaps.length,
+        },
+      };
+    }
+    if (arbitration.decision === "investigate") {
+      return {
+        initialPlan,
+        review: normalizedReview,
+        investigation_plan: arbitration.reasoning || "Arbiter requires more evidence before an accepted plan can be synthesized.",
+        plan_loop_depth: 1,
+        allow_plan_loop: false,
+        gaps,
+        run_status: {
+          status: gaps.length ? "completed_with_gaps" : "completed",
+          completed_phases: completed,
+          incomplete_phase: null,
+          reason: "Plan Loop produced an investigation result; no AcceptedPlan was synthesized.",
+          safe_to_use_decision: true,
+          redispatch_attempts: redispatchAttempts,
+          gaps_count: gaps.length,
+        },
+      };
+    }
+
+    const synthesized = await runWithRedispatch({
+      role: "plan-synthesizer",
+      phase: "plan_synthesis",
+      attempts: redispatchAttempts,
+      run: () => runPlanSynthesizer({ initialPlan, findings: review.findings, crossExam: review.crossExam, arbitration }),
+    });
+    if (!synthesized.ok) {
+      gaps.push(synthesized.gap);
+      return {
+        initialPlan,
+        review: normalizedReview,
+        blocked_reason: "Plan synthesizer did not return a valid AcceptedPlan.",
+        plan_loop_depth: 1,
+        allow_plan_loop: false,
+        gaps,
+        run_status: {
+          status: "incomplete",
+          completed_phases: completed,
+          incomplete_phase: "plan_synthesis",
+          reason: "Plan Loop stopped because synthesis failed validation.",
+          safe_to_use_decision: false,
+          redispatch_attempts: redispatchAttempts,
+          gaps_count: gaps.length,
+        },
+      };
+    }
+    completed.push("plan_synthesis");
+    const out = {
+      initialPlan,
+      review: normalizedReview,
+      acceptedPlan: synthesized.value,
+      plan_loop_depth: 1,
+      allow_plan_loop: false,
+      gaps,
+    };
+    const checked = validatePlanLoopResult(out);
+    const run_status = {
+      status: gaps.length ? "completed_with_gaps" : "completed",
+      completed_phases: completed,
+      incomplete_phase: null,
+      reason: checked.ok ? "Plan Loop produced an AcceptedPlan." : "Plan Loop produced a plan that failed final schema validation.",
+      safe_to_use_decision: checked.ok,
+      redispatch_attempts: redispatchAttempts,
+      gaps_count: gaps.length + (checked.ok ? 0 : 1),
+    };
+    if (checked.ok) return { ...checked.value, run_status };
+    return { ...out, gaps: [...gaps, { role: "plan-loop", kind: "schema_violation", detail: checked.errors.join("; ") }], run_status };
+  }
+  return { runReview, runReviewer, runCrossExaminer, runArbiter, runSolutionDesigner, runPlanSynthesizer, runPlanLoop, runRepairPlanner, runRepairPlanReview, _internals: { sid, readReply, createSession, cleanup, modelFor } };
 }

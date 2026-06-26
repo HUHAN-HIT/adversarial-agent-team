@@ -63,6 +63,34 @@ export const AdversarialTeam = async ({ client, directory }) => {
   };
 
 
+  tools.adversarial_plan_loop = tool({
+    description:
+      "Adversarial-agent-team Mode C2: generate an InitialPlan, review it with an isolated " +
+      "agent team as target_type=plan, arbitrate it, and synthesize an AcceptedPlan only when " +
+      "the plan review permits synthesis. Uses plan_loop_depth=1 and allow_plan_loop=false; " +
+      "block/investigate returns blocked_reason or investigation_plan without a final plan.",
+    args: {
+      goal: z.string().describe("Goal the plan must satisfy."),
+      evidence: z.string().describe("Serialized evidence pack for the target and constraints."),
+      constraints: z.string().optional().describe("Optional additional constraints for plan design."),
+      roles: z.string().optional().describe("Optional JSON string of role list. Defaults to pro/con/implementation/risk/assumption/test."),
+      size: z.enum(["minimal", "standard", "full"]).optional(),
+      crossExam: z.boolean().optional().describe("Run plan-review cross-examiner. Defaults true for full."),
+    },
+    async execute({ goal, evidence, constraints, roles, size, crossExam }) {
+      const rs = parseJsonArg("roles", roles, undefined);
+      if (!rs.ok) return JSON.stringify({ gaps: [{ role: "plan-loop", kind: "error", detail: rs.error }] });
+      const out = await engine.runPlanLoop({
+        goal,
+        evidence,
+        constraints,
+        roles: rs.value,
+        size: size || "standard",
+        crossExam,
+      });
+      return JSON.stringify(out);
+    },
+  });
   tools.adversarial_repair_plan = tool({
     description:
       "Adversarial-agent-team Mode C2: create a bounded RemediationPlan from an existing " +
