@@ -11,6 +11,8 @@ import {
   validateFindings,
   validateCrossExam,
   validateArbitration,
+  validateRepairPlan,
+  validateRepairPlanReviewResult,
   ROLE_PROMPTS,
   createEngine,
 } from "../assets/opencode/plugin/adversarial-engine.mjs";
@@ -88,6 +90,103 @@ const repoRoot = join(scriptDir, "..");
   ok(ar.ok && ar.value.decision === "block" && ar.value.required_changes.length === 1, "arbitration normalizes decision");
 }
 
+// 5b) repair plan / repair-plan-review 校验：计划与二阶审查是独立 artifact，不塞进 arbitration。
+{
+  const rp = validateRepairPlan({
+    plan_id: "RP-1",
+    source_decision: "revise",
+    source_required_changes: [{ id: "RC1", text: "Fix enumeration" }],
+    objectives: ["Remove user enumeration"],
+    steps: [{
+      id: "STEP1",
+      addresses: ["RC1", "S1"],
+      action: "Return a uniform response for known and unknown email addresses.",
+      files_or_interfaces: ["src/auth/reset.ts"],
+      validation: ["Add tests for known and unknown email responses."],
+      dependencies: [],
+      risks: ["May affect clients relying on 404."]
+    }],
+    rollback: ["Revert endpoint response change if compatibility breaks."],
+    verification_commands: ["npm test -- auth/reset"],
+    residual_risks: ["External rate limiting still unverified."]
+  });
+  ok(rp.ok && rp.value.steps[0].addresses.includes("RC1"), "repair plan validates and preserves coverage refs");
+
+  const yamlPlan = validateRepairPlan(parseStructured([
+    "```yaml",
+    "plan_id: RP-2",
+    "source_decision: revise",
+    "source_required_changes:",
+    "  - id: RC1",
+    "    text: Fix S1",
+    "objectives:",
+    "  - Fix S1 safely",
+    "steps:",
+    "  - id: STEP1",
+    "    addresses: [RC1]",
+    "    action: Fix S1",
+    "    validation:",
+    "      - npm test",
+    "rollback:",
+    "  - Revert STEP1",
+    "verification_commands:",
+    "  - npm test",
+    "residual_risks: []",
+    "```",
+  ].join("\n")).value);
+  ok(yamlPlan.ok && yamlPlan.value.steps[0].addresses.includes("RC1"), "repair plan YAML inline address list parses");
+
+  const review = validateRepairPlanReviewResult({
+    repair_plan_id: "RP-1",
+    review_purpose: "repair_plan_review",
+    repair_depth: 1,
+    coverage: [{ required_change: "RC1", status: "addressed", evidence: "STEP1 addresses RC1" }],
+    findings: [],
+    arbitration: { decision: "accept", risk_level: "low", confidence: "high", reasoning: "covered" },
+    gaps: []
+  }, ["RC1"]);
+  ok(review.ok && review.value.coverage[0].status === "addressed", "repair plan review validates addressed coverage");
+  const incompletePlan = validateRepairPlan({
+    plan_id: "RP-3",
+    source_decision: "revise",
+    source_required_changes: [{ id: "RC1", text: "Fix first issue" }],
+    objectives: ["Fix only one issue"],
+    steps: [{ id: "STEP1", addresses: ["RC1"], action: "Fix first issue", validation: ["npm test"] }],
+    rollback: ["Revert STEP1"],
+    verification_commands: ["npm test"],
+    residual_risks: []
+  }, [{ id: "RC1", text: "Fix first issue" }, { id: "RC2", text: "Fix second issue" }]);
+  ok(!incompletePlan.ok, "repair plan must preserve every original required change");
+  const uncoveredPlan = validateRepairPlan({
+    plan_id: "RP-4",
+    source_decision: "revise",
+    source_required_changes: [{ id: "RC1", text: "Fix first issue" }, { id: "RC2", text: "Fix second issue" }],
+    objectives: ["Fix both issues"],
+    steps: [{ id: "STEP1", addresses: ["RC1"], action: "Fix first issue", validation: ["npm test"] }],
+    rollback: ["Revert STEP1"],
+    verification_commands: ["npm test"],
+    residual_risks: []
+  }, [{ id: "RC1", text: "Fix first issue" }, { id: "RC2", text: "Fix second issue" }]);
+  ok(!uncoveredPlan.ok, "repair plan must map every original required change to a step");
+
+  const invalidReview = validateRepairPlanReviewResult({
+    repair_plan_id: "RP-1",
+    review_purpose: "normal_review",
+    repair_depth: 2,
+    coverage: [{ required_change: "RC1", status: "addressed", evidence: "STEP1" }],
+    arbitration: { decision: "accept", risk_level: "low", confidence: "high", reasoning: "wrong depth" },
+  }, ["RC1"]);
+  ok(!invalidReview.ok, "repair plan review result rejects wrong purpose/depth");
+
+  const missing = validateRepairPlanReviewResult({
+    repair_plan_id: "RP-1",
+    review_purpose: "repair_plan_review",
+    repair_depth: 1,
+    coverage: [],
+    arbitration: { decision: "accept", risk_level: "low", confidence: "high", reasoning: "incorrectly optimistic" },
+  }, ["RC1"]);
+  ok(missing.ok && missing.value.arbitration.decision !== "accept", "missing required-change coverage cannot remain accept");
+}
 // 6) 无 fence 的裸 JSON 也能解析
 {
   const { value } = parseStructured('{"agent":"pro","stance":"pro","summary":"s","claims":[{"id":"C1","claim":"c","evidence":"e","severity":"low","confidence":"low"}]}');
@@ -99,7 +198,8 @@ const repoRoot = join(scriptDir, "..");
   const required = ["pro", "con", "cross-examiner", "arbiter",
     "correctness-reviewer", "security-reviewer", "test-reviewer", "architecture-reviewer",
     "performance-reviewer", "ops-reviewer", "ux-api-reviewer",
-    "feasibility-reviewer", "risk-reviewer", "impact-reviewer", "assumption-reviewer", "implementation-reviewer"];
+    "feasibility-reviewer", "risk-reviewer", "impact-reviewer", "assumption-reviewer", "implementation-reviewer",
+    "repair-planner"];
   const missing = required.filter((r) => !ROLE_PROMPTS[r]);
   ok(missing.length === 0, `ROLE_PROMPTS missing: ${missing.join(",")}`);
   ok(!ROLE_PROMPTS.coordinator && !ROLE_PROMPTS.scribe, "coordinator/scribe NOT in ROLE_PROMPTS (D6/D8)");
@@ -122,6 +222,8 @@ const repoRoot = join(scriptDir, "..");
     ok(missing.length === 0, `output-schema.md missing ${name} enum values: ${missing.join(",")}`);
   }
   ok(schemaDoc.includes("mode: A | B | C | C2 | D"), "output-schema evidence pack includes Mode C2");
+  ok(schemaDoc.includes("run_status:"), "output-schema documents run_status envelope");
+  ok(schemaDoc.includes("safe_to_use_decision:"), "output-schema documents unsafe incomplete decisions");
 }
 
 // 9) Debug prompt logging records prompts only and preserves reviewer-output isolation evidence.
@@ -189,5 +291,316 @@ const repoRoot = join(scriptDir, "..");
   await rm(tempDir, { recursive: true, force: true });
 }
 
+// 10) Bounded redispatch: retry recoverable role failures in a fresh isolated session.
+{
+  const calls = [];
+  let sessionSeq = 0;
+  const askCountByTitle = new Map();
+  const titlesById = new Map();
+  const client = {
+    session: {
+      create: async ({ body }) => {
+        const id = `rd${++sessionSeq}`;
+        titlesById.set(id, body.title);
+        calls.push(["create", body.title, id]);
+        return { data: { id } };
+      },
+      prompt: async ({ path, body }) => {
+        if (body.noReply) return { data: { parts: [] } };
+        const title = titlesById.get(path.id);
+        const n = (askCountByTitle.get(title) || 0) + 1;
+        askCountByTitle.set(title, n);
+        calls.push(["ask", title, path.id, n]);
+        if (title === "adv-con" && n === 1) throw new Error("transient model failure");
+        const agent = title === "adv-con" ? "con" : "pro";
+        return {
+          data: { parts: [{ type: "text", text: JSON.stringify({
+            agent,
+            stance: agent,
+            summary: `${agent} recovered`,
+            claims: [{ id: "C1", claim: `${agent} claim`, evidence: "mock", severity: "low", confidence: "high" }]
+          }) }] }
+        };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => ({}),
+      delete: async () => ({}),
+    },
+  };
+  const engine = createEngine({
+    client,
+    cfg: {
+      defaultModel: { providerID: "mock", modelID: "mock" },
+      roleModels: {},
+      maxParallel: 1,
+      perRoleTimeoutMs: 1000,
+      maxRedispatchPerRole: 1,
+      independentArbiter: false,
+      debug: false,
+    },
+  });
+  const out = await engine.runReview({
+    evidence: "target_type: code\ntarget_summary: redispatch reviewer",
+    roles: [{ name: "pro", stance: "pro" }, { name: "con", stance: "con" }],
+    size: "minimal",
+  });
+  ok(out.findings.length === 2, "redispatch recovers a failed reviewer");
+  ok(calls.filter((c) => c[0] === "create" && c[1] === "adv-con").length === 2, "redispatch creates a fresh session for the failed reviewer");
+  ok(out.run_status?.redispatch_attempts?.some((a) => a.role === "con" && a.success === true), "run_status records successful redispatch attempt");
+  ok(out.gaps.length === 0 && out.run_status?.status === "completed", "recovered redispatch does not leave stale gaps");
+}
+
+// 11) Incomplete run status: a failed arbiter must not be reported as a safe completed decision.
+{
+  let sessionSeq = 0;
+  const titlesById = new Map();
+  const client = {
+    session: {
+      create: async ({ body }) => {
+        const id = `rs${++sessionSeq}`;
+        titlesById.set(id, body.title);
+        return { data: { id } };
+      },
+      prompt: async ({ path, body }) => {
+        if (body.noReply) return { data: { parts: [] } };
+        const title = titlesById.get(path.id);
+        if (title === "adv-arbiter") throw new Error("arbiter unavailable");
+        const agent = title === "adv-con" ? "con" : "pro";
+        return {
+          data: { parts: [{ type: "text", text: JSON.stringify({
+            agent,
+            stance: agent,
+            summary: `${agent} summary`,
+            claims: [{ id: "C1", claim: `${agent} claim`, evidence: "mock", severity: "low", confidence: "high" }]
+          }) }] }
+        };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => ({}),
+      delete: async () => ({}),
+    },
+  };
+  const engine = createEngine({
+    client,
+    cfg: {
+      defaultModel: { providerID: "mock", modelID: "mock" },
+      roleModels: {},
+      maxParallel: 2,
+      perRoleTimeoutMs: 1000,
+      maxRedispatchPerRole: 0,
+      independentArbiter: true,
+      debug: false,
+    },
+  });
+  const out = await engine.runReview({
+    evidence: "target_type: code\ntarget_summary: arbiter failure",
+    roles: [{ name: "pro", stance: "pro" }, { name: "con", stance: "con" }],
+    size: "standard",
+  });
+  ok(!out.arbitration, "arbiter failure leaves arbitration absent");
+  ok(out.run_status?.status === "incomplete", "arbiter failure marks the run incomplete");
+  ok(out.run_status?.incomplete_phase === "arbitration", "run_status identifies arbitration as incomplete phase");
+  ok(out.run_status?.safe_to_use_decision === false, "incomplete arbitration is not safe to use as a decision");
+}
+// 12) Repair planner lifecycle: planner is explicit and does not fan out reviewers.
+{
+  const calls = [];
+  let sessionSeq = 0;
+  const client = {
+    session: {
+      create: async ({ body }) => {
+        calls.push(["create", body.title]);
+        return { data: { id: `rp${++sessionSeq}` } };
+      },
+      prompt: async ({ path, body }) => {
+        calls.push([body.noReply ? "inject" : "ask", path.id, body.parts?.[0]?.text || ""]);
+        if (body.noReply) return { data: { parts: [] } };
+        return {
+          data: { parts: [{ type: "text", text: JSON.stringify({
+            plan_id: "RP-1",
+            source_decision: "revise",
+            source_required_changes: [{ id: "RC1", text: "Fix S1" }],
+            objectives: ["Fix S1 safely"],
+            steps: [{ id: "STEP1", addresses: ["RC1"], action: "Fix S1", validation: ["Run focused test"] }],
+            rollback: ["Revert STEP1"],
+            verification_commands: ["npm test"],
+            residual_risks: []
+          }) }] }
+        };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => ({}),
+      delete: async () => ({}),
+    },
+  };
+  const engine = createEngine({
+    client,
+    cfg: {
+      defaultModel: { providerID: "mock", modelID: "mock" },
+      roleModels: {},
+      maxParallel: 2,
+      perRoleTimeoutMs: 1000,
+      independentArbiter: false,
+      debug: false,
+    },
+  });
+  const out = await engine.runRepairPlanner({
+    evidence: "target_type: code",
+    findings: [{ agent: "con", stance: "con", summary: "s", claims: [{ id: "C1", claim: "c", evidence: "e", severity: "high", confidence: "high" }] }],
+    arbitration: { decision: "revise", risk_level: "high", confidence: "high", required_changes: ["Fix S1"], reasoning: "must fix" },
+  });
+  ok(out.ok && out.repairPlan.plan_id === "RP-1", "runRepairPlanner returns a repair plan");
+  ok(calls.filter((c) => c[0] === "create").length === 1 && calls[0][1] === "adv-repair-planner", "runRepairPlanner creates only the planner session");
+}
+
+// 13) Repair planner redispatch: planner failure retries in a fresh session without reviewer fan-out.
+{
+  const calls = [];
+  let sessionSeq = 0;
+  let askCount = 0;
+  const client = {
+    session: {
+      create: async ({ body }) => {
+        calls.push(["create", body.title]);
+        return { data: { id: `rpr${++sessionSeq}` } };
+      },
+      prompt: async ({ path, body }) => {
+        calls.push([body.noReply ? "inject" : "ask", path.id, body.parts?.[0]?.text || ""]);
+        if (body.noReply) return { data: { parts: [] } };
+        askCount += 1;
+        if (askCount === 1) throw new Error("planner transient failure");
+        return {
+          data: { parts: [{ type: "text", text: JSON.stringify({
+            plan_id: "RP-1",
+            source_decision: "revise",
+            source_required_changes: [{ id: "RC1", text: "Fix S1" }],
+            objectives: ["Fix S1 safely"],
+            steps: [{ id: "STEP1", addresses: ["RC1"], action: "Fix S1", validation: ["Run focused test"] }],
+            rollback: ["Revert STEP1"],
+            verification_commands: ["npm test"],
+            residual_risks: []
+          }) }] }
+        };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => ({}),
+      delete: async () => ({}),
+    },
+  };
+  const engine = createEngine({
+    client,
+    cfg: {
+      defaultModel: { providerID: "mock", modelID: "mock" },
+      roleModels: {},
+      maxParallel: 2,
+      perRoleTimeoutMs: 1000,
+      maxRedispatchPerRole: 1,
+      independentArbiter: false,
+      debug: false,
+    },
+  });
+  const out = await engine.runRepairPlanner({
+    evidence: "target_type: code",
+    findings: [{ agent: "con", stance: "con", summary: "s", claims: [{ id: "C1", claim: "c", evidence: "e", severity: "high", confidence: "high" }] }],
+    arbitration: { decision: "revise", risk_level: "high", confidence: "high", required_changes: ["Fix S1"], reasoning: "must fix" },
+  });
+  ok(out.ok && out.repairPlan.plan_id === "RP-1", "runRepairPlanner redispatch recovers transient planner failure");
+  ok(calls.filter((c) => c[0] === "create" && c[1] === "adv-repair-planner").length === 2, "runRepairPlanner redispatch creates a fresh planner session");
+  ok(out.run_status?.redispatch_attempts?.some((a) => a.role === "repair-planner" && a.success === true), "planner redispatch is audited in run_status");
+}
+// 14) Repair plan review lifecycle: fan-out review + arbiter, no planner recursion.
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "adv-repair-review-"));
+  const logDir = join(tempDir, "logs");
+  const calls = [];
+  let sessionSeq = 0;
+  const client = {
+    session: {
+      create: async ({ body }) => {
+        calls.push(["create", body.title]);
+        return { data: { id: `rr${++sessionSeq}` } };
+      },
+      prompt: async ({ path, body }) => {
+        const prompt = body.parts?.[0]?.text || "";
+        calls.push([body.noReply ? "inject" : "ask", path.id, prompt]);
+        if (body.noReply) return { data: { parts: [] } };
+        if (prompt.includes("repair_plan_id:")) {
+          return { data: { parts: [{ type: "text", text: JSON.stringify({
+            decision: "accept",
+            risk_level: "low",
+            confidence: "high",
+            required_changes: [],
+            optional_improvements: [],
+            residual_risks: [],
+            arbiter_discovered_gaps: [],
+            reasoning: "Repair plan covers RC1. This does not change the original target decision."
+          }) }] } };
+        }
+        const agent = prompt.includes("agent: con") ? "con" : prompt.includes("agent: implementation-reviewer") ? "implementation-reviewer" : "pro";
+        const stance = agent === "implementation-reviewer" ? "dimension" : agent;
+        return { data: { parts: [{ type: "text", text: JSON.stringify({
+          agent,
+          stance,
+          dimension: stance === "dimension" ? "implementation" : undefined,
+          summary: `${agent} summary`,
+          claims: [{ id: "C1", claim: `${agent}-repair-review-claim`, evidence: "repair plan RC1", severity: "low", confidence: "high" }]
+        }) }] } };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => ({}),
+      delete: async () => ({}),
+    },
+  };
+  const engine = createEngine({
+    client,
+    cfg: {
+      defaultModel: { providerID: "mock", modelID: "mock" },
+      roleModels: {},
+      maxParallel: 3,
+      perRoleTimeoutMs: 1000,
+      independentArbiter: "auto",
+      debug: true,
+      debugPromptLogDir: logDir,
+    },
+  });
+  const repairPlan = {
+    plan_id: "RP-1",
+    source_decision: "revise",
+    source_required_changes: [{ id: "RC1", text: "Fix S1" }],
+    objectives: ["Fix S1 safely"],
+    steps: [{ id: "STEP1", addresses: ["RC1"], action: "Fix S1", validation: ["Run focused test"] }],
+    rollback: ["Revert STEP1"],
+    verification_commands: ["npm test"],
+    residual_risks: []
+  };
+  const out = await engine.runRepairPlanReview({
+    repairPlan,
+    evidence: "target_type: code\nreviewed-output-should-not-leak",
+    findings: [],
+    arbitration: { decision: "revise", risk_level: "high", confidence: "high", required_changes: ["Fix S1"], reasoning: "must fix" },
+    roles: [{ name: "pro", stance: "pro" }, { name: "con", stance: "con" }, { name: "implementation-reviewer", stance: "dimension", dimension: "implementation" }, { name: "repair-planner", stance: "dimension", dimension: "repair" }],
+    size: "standard",
+  });
+  ok(out.findings.length === 3 && out.arbitration?.decision === "accept", "runRepairPlanReview fans out reviewers and arbitrates the plan");
+  ok(out.coverage[0]?.required_change === "RC1" && out.coverage[0].status === "addressed", "runRepairPlanReview derives required-change coverage");
+  ok(!calls.some((c) => c[1] === "adv-repair-planner"), "runRepairPlanReview does not call repair planner");
+  ok(out.run_status?.status === "completed" && out.run_status.safe_to_use_decision === true, "runRepairPlanReview returns a completed safe run_status");
+  const omittedRequired = await engine.runRepairPlanReview({
+    repairPlan,
+    evidence: "target_type: code",
+    findings: [],
+    arbitration: { decision: "revise", risk_level: "high", confidence: "high", required_changes: ["Fix S1", "Fix S2"], reasoning: "must fix both" },
+    roles: [{ name: "pro", stance: "pro" }],
+    size: "standard",
+  });
+  ok(omittedRequired.gaps?.some((g) => g.kind === "schema_violation"), "runRepairPlanReview rejects a plan missing an original required change");
+  const files = await readdir(logDir);
+  const reviewerFiles = files.filter((f) => f.includes("-rr1-") || f.includes("-rr2-") || f.includes("-rr3-"));
+  const combined = (await Promise.all(reviewerFiles.map((f) => readFile(join(logDir, f), "utf8")))).join("\n");
+  ok(combined.includes("allow_repair_planning: false") && combined.includes("repair_depth: 1"), "repair reviewer prompts carry recursion guard");
+  ok(combined.includes("Fix S1"), "repair reviewer prompts include original required changes");
+  ok(!combined.includes("pro-repair-review-claim") && !combined.includes("con-repair-review-claim"), "repair reviewer prompt logs exclude other reviewer outputs");
+  await rm(tempDir, { recursive: true, force: true });
+}
 console.log(`\n=== engine pure self-test: ${pass} passed, ${fail} failed ===`);
 process.exit(fail ? 1 : 0);

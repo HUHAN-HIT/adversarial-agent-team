@@ -27,12 +27,14 @@ const CONFIDENCE = ["high", "medium", "low"];
 const STANCE = ["pro", "con", "dimension"];
 const DECISION = ["accept", "accept_with_conditions", "revise", "block", "investigate"];
 const RISK = ["critical", "high", "medium", "low"];
+const COVERAGE_STATUS = ["addressed", "partial", "missing", "unverifiable"];
 export const SCHEMA_ENUMS = Object.freeze({
   severity: SEVERITY,
   confidence: CONFIDENCE,
   stance: STANCE,
   decision: DECISION,
   risk_level: RISK,
+  coverage_status: COVERAGE_STATUS,
 });
 
 // ============================ C2 专属 shared contract（设计 §6.6 / B1）========
@@ -92,6 +94,15 @@ Emit a cross-exam block.`,
 - Judge supplied evidence first; label any new issue an arbiter-discovered gap.
 - Never average opinions. One blocker can outweigh many approvals.
 Emit an arbitration block.`,
+
+  "repair-planner": `You are the Repair Planner. Convert an arbitration result and its required_changes into a bounded remediation plan.
+- Do not re-litigate the original review decision.
+- Do not place the repair plan inside the arbitration object.
+- Derive stable required-change ids RC1, RC2, ... from arbitration.required_changes in order.
+- Each required change must be addressed by at least one concrete plan step.
+- Include validation, rollback/abort guidance, assumptions, and residual risks.
+- The plan is a proposal to fix the target; it does not change the target decision.
+Emit a remediation plan block.`,
 };
 for (const [name, focus] of Object.entries(DIMENSIONS)) {
   ROLE_PROMPTS[name] = `You are the ${name} (stance: dimension, dimension: ${name.replace("-reviewer", "")}).
@@ -168,6 +179,72 @@ reasoning: <why this decision; never average — one blocker can outweigh many a
 No prose outside the block.`;
 }
 
+function repairPlanInstruction() {
+  return `Return ONLY a single fenced code block (\`\`\`yaml; JSON also accepted). Use EXACTLY these keys:
+
+\`\`\`yaml
+plan_id: RP-1
+source_decision: accept_with_conditions|revise|block|investigate
+source_required_changes:
+  - id: RC1
+    text: <required change text from arbitration.required_changes[0]>
+objectives:
+  - <what the repair plan must accomplish>
+steps:
+  - id: STEP1
+    addresses: [RC1]
+    action: <concrete repair action>
+    files_or_interfaces:
+      - <file, API, schema, or interface likely affected; may be empty if unknown>
+    validation:
+      - <test, command, or evidence needed to prove the step>
+    dependencies:
+      - <prerequisite, may be empty>
+    risks:
+      - <new risk this step may introduce, may be empty>
+non_goals:
+  - <explicitly out of scope, may be empty>
+assumptions:
+  - <assumption, may be empty>
+rollback:
+  - <rollback or abort path>
+verification_commands:
+  - <command or check>
+residual_risks:
+  - <risk remaining after the repair plan>
+\`\`\`
+
+Rules:
+- Derive RC1, RC2, ... from arbitration.required_changes in order.
+- Every source_required_changes id must appear in at least one step.addresses entry.
+- Do not change the original target decision; this is only a proposed repair plan.
+No prose outside the block.`;
+}
+
+function repairPlanReviewArbitrationInstruction() {
+  return `Return ONLY a single fenced code block (\`\`\`yaml; JSON also accepted). Use the normal arbitration keys:
+
+\`\`\`yaml
+decision: accept|accept_with_conditions|revise|block|investigate
+risk_level: critical|high|medium|low
+confidence: high|medium|low
+required_changes:
+  - <changes required to the repair plan itself, not to the original target>
+optional_improvements:
+  - <non-blocking repair-plan improvement>
+residual_risks:
+  - <risk remaining if this repair plan is followed>
+arbiter_discovered_gaps:
+  - <new gap in the repair plan review, may be empty>
+reasoning: <judge whether the repair plan covers the original required_changes; do not claim the target is fixed>
+\`\`\`
+
+Rules:
+- Arbitrate the repair plan, not the original target.
+- Do not generate a new repair plan or a repair-plan-of-repair-plan.
+- If any original required change is missing or unverifiable, decision must not be accept.
+No prose outside the block.`;
+}
 const REPARSE_NUDGE =
   "Your previous reply could not be parsed. Output ONLY one fenced code block with the required keys and NOTHING else (no prose, no explanation before or after).";
 
@@ -206,6 +283,11 @@ export function parseYamlSubset(src) {
     if (/^(true|false)$/i.test(s)) return /^true$/i.test(s);
     if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
     if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1);
+    if (s.startsWith("[") && s.endsWith("]")) {
+      const inner = s.slice(1, -1).trim();
+      if (!inner) return [];
+      return inner.split(",").map((item) => parseScalar(item.trim())).filter((item) => item !== "");
+    }
     return s;
   }
   function parseBlockScalar(baseIndent, marker) {
@@ -370,6 +452,101 @@ export function validateArbitration(o) {
   };
 }
 
+function normalizeRequiredChanges(changes) {
+  return strList(changes).map((text, idx) => ({ id: `RC${idx + 1}`, text }));
+}
+
+function normalizeRepairStep(step, idx) {
+  const s = step || {};
+  return {
+    id: String(s.id ?? `STEP${idx + 1}`).trim(),
+    addresses: strList(s.addresses),
+    action: String(s.action ?? "").trim(),
+    files_or_interfaces: strList(s.files_or_interfaces),
+    validation: strList(s.validation),
+    dependencies: strList(s.dependencies),
+    risks: strList(s.risks),
+  };
+}
+
+export function validateRepairPlan(o, expectedRequiredChanges = []) {
+  if (!o || typeof o !== "object") return { ok: false, errors: ["not an object"] };
+  const warnings = [];
+  const sourceRequired = asArray(o.source_required_changes).map((r, idx) => {
+    if (r && typeof r === "object") return { id: String(r.id ?? `RC${idx + 1}`).trim(), text: String(r.text ?? "").trim() };
+    return { id: `RC${idx + 1}`, text: String(r ?? "").trim() };
+  }).filter((r) => r.id && r.text);
+  const steps = asArray(o.steps).map(normalizeRepairStep).filter((s) => s.id && s.action);
+  const expectedRequired = asArray(expectedRequiredChanges).map((r, idx) => {
+    if (r && typeof r === "object") return { id: String(r.id ?? `RC${idx + 1}`).trim(), text: String(r.text ?? "").trim() };
+    return { id: `RC${idx + 1}`, text: String(r ?? "").trim() };
+  }).filter((r) => r.id && r.text);
+  if (sourceRequired.length === 0) return { ok: false, errors: ["source_required_changes empty/missing"] };
+  if (expectedRequired.length) {
+    const actual = new Map(sourceRequired.map((r) => [r.id, r.text]));
+    const missingExpected = expectedRequired.filter((r) => actual.get(r.id) !== r.text).map((r) => r.id);
+    const extraActual = sourceRequired.filter((r) => !expectedRequired.some((e) => e.id === r.id)).map((r) => r.id);
+    if (missingExpected.length || extraActual.length) {
+      return { ok: false, errors: [`source_required_changes mismatch; missing_or_changed=${missingExpected.join(",")}; extra=${extraActual.join(",")}`] };
+    }
+  }
+  if (steps.length === 0) return { ok: false, errors: ["steps empty/missing"] };
+  const addressed = new Set(steps.flatMap((s) => s.addresses));
+  const missing = sourceRequired.filter((r) => !addressed.has(r.id)).map((r) => r.id);
+  if (missing.length) return { ok: false, errors: [`required changes not addressed by any step: ${missing.join(",")}`] };
+  return {
+    ok: true,
+    value: {
+      plan_id: String(o.plan_id ?? "RP-1").trim(),
+      source_decision: coerceEnum(o.source_decision, DECISION.filter((d) => d !== "accept"), "revise"),
+      source_required_changes: sourceRequired,
+      objectives: strList(o.objectives),
+      steps,
+      non_goals: strList(o.non_goals),
+      assumptions: strList(o.assumptions),
+      rollback: strList(o.rollback),
+      verification_commands: strList(o.verification_commands),
+      residual_risks: strList(o.residual_risks),
+    },
+    warnings,
+  };
+}
+
+export function validateRepairPlanReviewResult(o, requiredChangeIds = []) {
+  if (!o || typeof o !== "object") return { ok: false, errors: ["not an object"] };
+  const purpose = String(o.review_purpose ?? "repair_plan_review").trim();
+  const depth = Number(o.repair_depth ?? 1);
+  if (purpose !== "repair_plan_review") return { ok: false, errors: [`invalid review_purpose: ${purpose}`] };
+  if (depth !== 1) return { ok: false, errors: [`invalid repair_depth: ${depth}`] };
+  const requiredIds = strList(requiredChangeIds);
+  const coverage = asArray(o.coverage).map((c) => ({
+    required_change: String(c?.required_change ?? "").trim(),
+    status: coerceEnum(c?.status, COVERAGE_STATUS, "unverifiable"),
+    evidence: String(c?.evidence ?? "").trim(),
+  })).filter((c) => c.required_change);
+  const covered = new Set(coverage.filter((c) => c.status === "addressed" || c.status === "partial").map((c) => c.required_change));
+  const missing = requiredIds.filter((id) => !covered.has(id));
+  const arb = validateArbitration(o.arbitration || {}).value;
+  if (missing.length && arb.decision === "accept") {
+    arb.decision = "revise";
+    arb.risk_level = arb.risk_level === "low" ? "medium" : arb.risk_level;
+    arb.required_changes = [...arb.required_changes, `Repair plan coverage missing or unverifiable for: ${missing.join(", ")}`];
+    arb.arbiter_discovered_gaps = [...arb.arbiter_discovered_gaps, `repair_plan_review coverage guard downgraded accept because missing: ${missing.join(", ")}`];
+  }
+  return {
+    ok: true,
+    value: {
+      repair_plan_id: String(o.repair_plan_id ?? "").trim(),
+      review_purpose: purpose,
+      repair_depth: depth,
+      coverage,
+      findings: asArray(o.findings),
+      crossExam: o.crossExam,
+      arbitration: arb,
+      gaps: asArray(o.gaps),
+    },
+  };
+}
 // ============================ 通用工具 =======================================
 export class TimeoutError extends Error {
   constructor(m) { super(m); this.name = "TimeoutError"; }
@@ -406,6 +583,7 @@ export async function loadConfig({ directory } = {}) {
     roleModels: {},
     maxParallel: 4,            // V5 实测 6/6 可用，保守取 4
     perRoleTimeoutMs: 180000,
+    maxRedispatchPerRole: 1,
     independentArbiter: "auto", // auto = minimal→false, standard/full→true（D6）
     debug: false,
     debugPromptLogDir: directory ? join(directory, ".opencode", "adversarial-team-log") : null,
@@ -518,6 +696,58 @@ export function createEngine({ client, cfg }) {
     try { await client.session.delete({ path: { id } }); } catch (e) { log("delete failed", e?.message ?? e); }
   }
   const modelFor = (role) => role.model ?? C.roleModels?.[role.name] ?? C.defaultModel;
+  const maxRedispatch = Number.isFinite(Number(C.maxRedispatchPerRole)) ? Math.max(0, Number(C.maxRedispatchPerRole)) : 1;
+  function isRedispatchableGap(gap) {
+    if (!gap || gap.detail?.startsWith?.("unknown role:")) return false;
+    return ["timeout", "empty", "schema_violation", "error"].includes(gap.kind);
+  }
+  async function runWithRedispatch({ role, phase, attempts, run }) {
+    let result = await run();
+    for (let attempt = 1; attempt <= maxRedispatch && !result?.ok && isRedispatchableGap(result.gap); attempt++) {
+      const previous = result.gap || {};
+      result = await run();
+      attempts.push({
+        role,
+        phase,
+        attempt,
+        reason_kind: previous.kind || "error",
+        reason_detail: String(previous.detail || "").slice(0, 200),
+        success: Boolean(result?.ok),
+      });
+    }
+    return result;
+  }
+  function buildRunStatus({ findings = [], crossExam, crossRequired = false, arbitration, arbiterRequired = false, gaps = [], redispatchAttempts = [] } = {}) {
+    const completed = [];
+    if (findings.length) completed.push("role_review");
+    if (crossRequired && crossExam) completed.push("cross_examination");
+    if (arbiterRequired && arbitration) completed.push("arbitration");
+    let status = gaps.length ? "completed_with_gaps" : "completed";
+    let incomplete_phase = null;
+    let reason = gaps.length ? "Completed with recorded role or phase gaps." : "All required phases completed.";
+    if (!findings.length) {
+      status = "failed";
+      incomplete_phase = "role_review";
+      reason = "No reviewer findings were produced.";
+    } else if (arbiterRequired && !arbitration) {
+      status = "incomplete";
+      incomplete_phase = "arbitration";
+      reason = "Arbitration did not complete; no final decision is available.";
+    } else if (crossRequired && !crossExam) {
+      status = "incomplete";
+      incomplete_phase = "cross_examination";
+      reason = "Cross-examination did not complete; disputes were not fully sharpened.";
+    }
+    return {
+      status,
+      completed_phases: completed,
+      incomplete_phase,
+      reason,
+      safe_to_use_decision: Boolean(arbitration) && status !== "failed" && status !== "incomplete",
+      redispatch_attempts: redispatchAttempts,
+      gaps_count: gaps.length,
+    };
+  }
 
   function tryParse(raw, validate) {
     if (!raw || !raw.trim()) return { ok: false, errors: ["empty reply"] };
@@ -604,6 +834,258 @@ export function createEngine({ client, cfg }) {
     }
   }
 
+  function repairPlanRequiredIds(repairPlan) {
+    return asArray(repairPlan?.source_required_changes).map((r, idx) => String(r?.id ?? `RC${idx + 1}`).trim()).filter(Boolean);
+  }
+
+  function deriveRepairCoverage(repairPlan) {
+    const requiredIds = repairPlanRequiredIds(repairPlan);
+    const steps = asArray(repairPlan?.steps);
+    return requiredIds.map((id) => {
+      const matching = steps.filter((s) => strList(s?.addresses).includes(id));
+      return {
+        required_change: id,
+        status: matching.length ? "addressed" : "missing",
+        evidence: matching.length ? `Addressed by ${matching.map((s) => s.id || "unnamed-step").join(", ")}` : "No repair plan step references this required change.",
+      };
+    });
+  }
+
+  function buildRepairReviewEvidence({ repairPlan, evidence, findings, arbitration }) {
+    return `target_type: plan
+review_purpose: repair_plan_review
+repair_depth: 1
+allow_repair_planning: false
+target_summary: Review whether the supplied remediation plan covers the original required changes without introducing new problems.
+scope: repair plan only; do not change the original target decision
+constraints: one bounded review pass; no repair-plan-of-repair-plan; planner output must stay separate from arbitration
+success_criteria: every source_required_changes id is addressed and verifiable; validation and rollback are credible
+
+ORIGINAL EVIDENCE PACK:
+${evidence || ""}
+
+ORIGINAL REVIEWER FINDINGS:
+${findings?.length ? serializeFindings(findings) : "[]"}
+
+ORIGINAL ARBITRATION:
+${JSON.stringify(arbitration || {}, null, 2)}
+
+REMEDIATION PLAN:
+${JSON.stringify(repairPlan || {}, null, 2)}`;
+  }
+
+  async function runRepairPlanner({ evidence, findings = [], crossExam, arbitration, gaps = [] } = {}) {
+    if (!arbitration || !Array.isArray(arbitration.required_changes) || arbitration.required_changes.length === 0) {
+      const gap = { role: "repair-planner", kind: "error", detail: "arbitration.required_changes is required" };
+      return {
+        ok: false,
+        gap,
+        run_status: {
+          status: "failed",
+          completed_phases: [],
+          incomplete_phase: "repair_planning",
+          reason: "Repair planning cannot start without arbitration.required_changes.",
+          safe_to_use_decision: false,
+          redispatch_attempts: [],
+          gaps_count: 1,
+        },
+      };
+    }
+    const redispatchAttempts = [];
+    const sourceRequired = normalizeRequiredChanges(arbitration.required_changes);
+    async function runPlannerOnce() {
+      let id;
+      try {
+        id = await createSession("adv-repair-planner");
+        await injectRole(id, "repair-planner");
+        const r = await askWithRetry(
+          id, modelFor({ name: "repair-planner" }),
+          () => `ORIGINAL EVIDENCE PACK:
+${evidence || ""}
+
+ORIGINAL REVIEWER FINDINGS:
+${findings?.length ? serializeFindings(findings) : "[]"}${crossExam ? `
+
+ORIGINAL CROSS-EXAMINATION:
+${JSON.stringify(crossExam, null, 2)}` : ""}
+
+ORIGINAL ARBITRATION:
+${JSON.stringify({ ...arbitration, source_required_changes: sourceRequired }, null, 2)}${gaps?.length ? `
+
+ORIGINAL GAPS:
+${JSON.stringify(gaps, null, 2)}` : ""}
+
+${repairPlanInstruction()}`,
+          (raw) => tryParse(raw, (o) => validateRepairPlan(o, sourceRequired)),
+          "repair-planner",
+        );
+        if (!r.ok) return { ok: false, gap: { role: "repair-planner", kind: r.kind, detail: r.detail, raw: r.raw } };
+        return { ok: true, repairPlan: r.value };
+      } catch (e) {
+        return { ok: false, gap: { role: "repair-planner", kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
+      } finally {
+        await cleanup(id);
+      }
+    }
+    const result = await runWithRedispatch({
+      role: "repair-planner",
+      phase: "repair_planning",
+      attempts: redispatchAttempts,
+      run: runPlannerOnce,
+    });
+    if (result.ok) {
+      return {
+        ...result,
+        run_status: {
+          status: "completed",
+          completed_phases: ["repair_planning"],
+          incomplete_phase: null,
+          reason: "Repair plan produced.",
+          safe_to_use_decision: false,
+          redispatch_attempts: redispatchAttempts,
+          gaps_count: 0,
+        },
+      };
+    }
+    return {
+      ...result,
+      run_status: {
+        status: "failed",
+        completed_phases: [],
+        incomplete_phase: "repair_planning",
+        reason: "Repair planner did not produce a valid remediation plan.",
+        safe_to_use_decision: false,
+        redispatch_attempts: redispatchAttempts,
+        gaps_count: 1,
+      },
+    };
+  }
+  async function runRepairPlanArbiter({ repairPlan, coverage, findings, crossExam, arbitration }) {
+    let id;
+    try {
+      id = await createSession("adv-repair-plan-arbiter");
+      await injectRole(id, "arbiter");
+      const r = await askWithRetry(
+        id, modelFor({ name: "arbiter" }),
+        () => `repair_plan_id: ${repairPlan?.plan_id || ""}
+review_purpose: repair_plan_review
+repair_depth: 1
+allow_repair_planning: false
+
+ORIGINAL TARGET ARBITRATION (do not change this decision):
+${JSON.stringify(arbitration || {}, null, 2)}
+
+REMEDIATION PLAN:
+${JSON.stringify(repairPlan || {}, null, 2)}
+
+REPAIR PLAN COVERAGE:
+${JSON.stringify(coverage || [], null, 2)}
+
+REPAIR PLAN REVIEWER FINDINGS:
+${serializeFindings(findings || [])}${crossExam ? `
+
+REPAIR PLAN CROSS-EXAMINATION:
+${JSON.stringify(crossExam, null, 2)}` : ""}
+
+${repairPlanReviewArbitrationInstruction()}`,
+        (raw) => tryParse(raw, validateArbitration),
+        "repair-plan-arbiter",
+      );
+      if (!r.ok) return { ok: false, gap: { role: "repair-plan-arbiter", kind: r.kind, detail: r.detail, raw: r.raw } };
+      return { ok: true, value: r.value };
+    } catch (e) {
+      return { ok: false, gap: { role: "repair-plan-arbiter", kind: e?.name === "TimeoutError" ? "timeout" : "error", detail: String(e?.message ?? e) } };
+    } finally {
+      await cleanup(id);
+    }
+  }
+
+  async function runRepairPlanReview({ repairPlan, evidence, findings = [], arbitration, roles, size = "standard", crossExam } = {}) {
+    const expectedRequired = normalizeRequiredChanges(arbitration?.required_changes || []);
+    const rp = validateRepairPlan(repairPlan, expectedRequired);
+    if (!rp.ok) {
+      const gaps = [{ role: "repair-plan-review", kind: "schema_violation", detail: rp.errors.join("; ") }];
+      return {
+        coverage: [],
+        findings: [],
+        gaps,
+        run_status: {
+          status: "failed",
+          completed_phases: [],
+          incomplete_phase: "repair_plan_validation",
+          reason: "Repair plan schema validation failed before review fan-out.",
+          safe_to_use_decision: false,
+          redispatch_attempts: [],
+          gaps_count: gaps.length,
+        },
+      };
+    }
+    const plan = rp.value;
+    const defaultRepairReviewRoles = [
+      { name: "pro", stance: "pro" },
+      { name: "con", stance: "con" },
+      { name: "implementation-reviewer", stance: "dimension", dimension: "implementation" },
+      { name: "risk-reviewer", stance: "dimension", dimension: "risk" },
+      { name: "test-reviewer", stance: "dimension", dimension: "test" },
+    ];
+    const requestedRoles = Array.isArray(roles) && roles.length ? roles : defaultRepairReviewRoles;
+    const selectedRoles = requestedRoles.filter((r) => r?.name !== "repair-planner");
+    if (selectedRoles.length === 0) selectedRoles.push(...defaultRepairReviewRoles);
+    const reviewEvidence = buildRepairReviewEvidence({ repairPlan: plan, evidence, findings, arbitration });
+    const redispatchAttempts = [];
+    const results = await mapLimit(selectedRoles, C.maxParallel, (r) => runWithRedispatch({
+      role: r.name,
+      phase: "repair_plan_role_review",
+      attempts: redispatchAttempts,
+      run: () => runReviewer(r, reviewEvidence),
+    }));
+    const reviewFindings = results.filter((x) => x?.ok).map((x) => x.finding);
+    const gaps = results.filter((x) => x && !x.ok).map((x) => ({ role: x.role, ...x.gap }));
+
+    let cross;
+    if ((crossExam ?? size === "full") && reviewFindings.length) {
+      const cx = await runWithRedispatch({
+        role: "cross-examiner",
+        phase: "repair_plan_cross_examination",
+        attempts: redispatchAttempts,
+        run: () => runCrossExaminer(reviewFindings, reviewEvidence),
+      });
+      if (cx.ok) cross = cx.value; else gaps.push(cx.gap);
+    }
+    const coverage = deriveRepairCoverage(plan);
+    let repairArbitration;
+    if (reviewFindings.length) {
+      const ar = await runWithRedispatch({
+        role: "repair-plan-arbiter",
+        phase: "repair_plan_arbitration",
+        attempts: redispatchAttempts,
+        run: () => runRepairPlanArbiter({ repairPlan: plan, coverage, findings: reviewFindings, crossExam: cross, arbitration }),
+      });
+      if (ar.ok) repairArbitration = ar.value; else gaps.push(ar.gap);
+    }
+    const checked = validateRepairPlanReviewResult({
+      repair_plan_id: plan.plan_id,
+      review_purpose: "repair_plan_review",
+      repair_depth: 1,
+      coverage,
+      findings: reviewFindings,
+      crossExam: cross,
+      arbitration: repairArbitration,
+      gaps,
+    }, repairPlanRequiredIds(plan));
+    return {
+      ...checked.value,
+      run_status: buildRunStatus({
+        findings: reviewFindings,
+        crossExam: cross,
+        crossRequired: Boolean(crossExam ?? size === "full"),
+        arbitration: repairArbitration,
+        arbiterRequired: Boolean(reviewFindings.length),
+        gaps,
+        redispatchAttempts,
+      }),
+    };
+  }
   // 核心编排：fan-out reviewers → (可选) cross-exam → (可选) 独立 arbiter。
   async function runReview({ evidence, roles, size = "standard", crossExam } = {}) {
     if (!evidence || !Array.isArray(roles) || roles.length === 0) {
@@ -612,22 +1094,39 @@ export function createEngine({ client, cfg }) {
     const useCross = crossExam ?? size === "full";
     const useArb = C.independentArbiter === true || (C.independentArbiter === "auto" && size !== "minimal");
 
-    const results = await mapLimit(roles, C.maxParallel, (r) => runReviewer(r, evidence));
+    const redispatchAttempts = [];
+    const results = await mapLimit(roles, C.maxParallel, (r) => runWithRedispatch({
+      role: r.name,
+      phase: "role_review",
+      attempts: redispatchAttempts,
+      run: () => runReviewer(r, evidence),
+    }));
     const findings = results.filter((x) => x?.ok).map((x) => x.finding);
     const gaps = results.filter((x) => x && !x.ok).map((x) => ({ role: x.role, ...x.gap }));
 
     let cross;
     if (useCross && findings.length) {
-      const cx = await runCrossExaminer(findings, evidence);
+      const cx = await runWithRedispatch({
+        role: "cross-examiner",
+        phase: "cross_examination",
+        attempts: redispatchAttempts,
+        run: () => runCrossExaminer(findings, evidence),
+      });
       if (cx.ok) cross = cx.value; else gaps.push(cx.gap);
     }
     let arbitration;
     if (useArb && findings.length) {
-      const ar = await runArbiter(findings, cross);
+      const ar = await runWithRedispatch({
+        role: "arbiter",
+        phase: "arbitration",
+        attempts: redispatchAttempts,
+        run: () => runArbiter(findings, cross),
+      });
       if (ar.ok) arbitration = ar.value; else gaps.push(ar.gap);
     }
-    return { findings, crossExam: cross, arbitration, gaps };
+    const run_status = buildRunStatus({ findings, crossExam: cross, crossRequired: useCross, arbitration, arbiterRequired: useArb, gaps, redispatchAttempts });
+    return { findings, crossExam: cross, arbitration, gaps, run_status };
   }
 
-  return { runReview, runReviewer, runCrossExaminer, runArbiter, _internals: { sid, readReply, createSession, cleanup, modelFor } };
+  return { runReview, runReviewer, runCrossExaminer, runArbiter, runRepairPlanner, runRepairPlanReview, _internals: { sid, readReply, createSession, cleanup, modelFor } };
 }

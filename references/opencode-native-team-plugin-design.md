@@ -175,7 +175,8 @@ args:
   { findings: Finding[],       # 见 6.5
     crossExam?: CrossExam,     # crossExam 为真时
     arbitration?: Arbitration, # independentArbiter 生效（Standard/Full 或显式 true）时，工具内部串独立 arbiter session 产出并带回（见 6.5/D6）；Minimal 缺省，由 lead 自仲裁
-    gaps: Gap[] }              # 失败/超时/非法的角色 —— 见下方"转译规则"
+    gaps: Gap[],               # 失败/超时/非法的角色 —— 见下方"转译规则"
+    run_status: RunStatus }    # completed/incomplete/failed 与 redispatch 审计；见 output-schema.md
 ```
 
 **`gaps` 转译规则（B2，对接 `output-schema.md`）：** plugin 返回的 `gaps` **不直接进 schema**。lead 收到后必须按下表转译：
@@ -258,6 +259,29 @@ visible to you. Your independence is structural, not a self-check.
 
 ---
 
+### 6.7 Remediation Plan tools (Phase 6/7 extension)
+
+C2 v1 keeps repair planning explicit instead of adding a hidden all-in-one review path.
+
+#### `adversarial_repair_plan`
+
+Input: `evidence`, `findings`, optional `crossExam`, `arbitration`, optional `gaps`.
+The tool creates one isolated `repair-planner` session and returns `{ repairPlan, gaps }`. The
+planner derives `RC1`, `RC2`, ... from `arbitration.required_changes` and emits the
+`RemediationPlan` schema. The plan is not embedded into arbitration and does not change the
+original target decision.
+
+#### `adversarial_repair_plan_review`
+
+Input: `repairPlan`, original `evidence`, original `findings`, original `arbitration`, optional
+`roles`, `size`, and `crossExam`. The engine builds a second-order evidence pack with
+`review_purpose: repair_plan_review`, `repair_depth: 1`, and `allow_repair_planning: false`, then
+reuses the existing fan-out reviewer path plus a repair-plan-specific arbiter prompt. Default roles
+are Pro, Con, `implementation-reviewer`, `risk-reviewer`, and `test-reviewer`.
+
+This tool judges the repair plan only. If the repair-plan arbitration says `accept`, that means the
+plan is plausible and covered; it does not mean the original code, PR, design, or decision has been
+fixed. The engine must not call the repair planner from inside repair-plan review.
 ## 7. 执行流程
 
 **Minimal（pro + con + arbiter）**
@@ -300,15 +324,20 @@ visible to you. Your independence is structural, not a self-check.
 
 | 情况 | 处理 |
 |---|---|
-| 某 reviewer 产出非法（json_schema 重试后仍失败） | SDK 层 `retryCount:2` 已耗尽后，该角色记入 `gaps[]` 且 `kind:"schema_violation"`，附原始文本片段；不中断；lead 按 §6.3 转译规则处理 |
-| 某 reviewer 超时（`perRoleTimeoutMs`） | `session.abort`（V9 核实后） + 记 `gaps[]` 且 `kind:"timeout"`，继续 |
-| 某 reviewer 空产出（SDK 返回成功但 `structured_output` 为空） | plugin 层重试一次（重发 step 3 prompt）；再空则记 `gaps[]` 且 `kind:"empty"` |
-| **两层重试关系（D1）** | SDK 层 `retryCount:2` 处理 **schema 违反**；plugin 层重试只处理 **SDK 已 exhausted 且返回成功但空** 的情形。两层不叠加在同一失败原因上 —— 最坏 6 次调用只发生在"模型连续产出合法 JSON 但内容空"的极端情况 |
+| 某 reviewer 产出非法（json_schema 重试后仍失败） | 先按 fenced 输出解析重提一次；仍失败则在新 session 中最多 redispatch 一次。仍失败才记入 `gaps[]` 且 `kind:"schema_violation"` |
+| 某 reviewer 超时（`perRoleTimeoutMs`） | `session.abort` + `delete` 清理该 session；在新 session 中最多 redispatch 一次。仍失败才记 `gaps[]` 且 `kind:"timeout"` |
+| 某 reviewer 空产出 | 同 session 重提一次；仍空则最多 redispatch 一次；仍失败才记 `gaps[]` 且 `kind:"empty"` |
+| cross-examiner / arbiter 失败 | 对该阶段最多 redispatch 一次。若 arbiter 仍失败，`run_status.status:"incomplete"` 且 `safe_to_use_decision:false` |
+| repair-plan review 失败 | 可 redispatch 二阶 reviewer/cross-examiner/arbiter，但不得调用 `repair-planner`，不得提升 `repair_depth` |
+| 非可恢复错误 | unknown role、输入缺失、repair depth/recursion guard 违反不 redispatch；直接 gap + failed/incomplete |
+| **两层重试关系（D1）** | 同 session 重提只处理格式/空产出；redispatch 只处理可恢复执行失败。两层都有上限，不会无限递归 |
 | 并发超 server 上限（V5 保守取 4） | 用 `maxParallel` 分批 `Promise.all`（信号量）。注意：即使 server 串行执行所有 session，`Promise.all` 仍是正确写法，只是不加速 |
 | session 清理失败 | 记 warn，不影响返回（孤儿 session 由用户/重启回收） |
+| 崩溃/人放弃 | v1 无持久化 resume；必须返回或呈现 incomplete/aborted 状态，不能伪造成完成。需要自动恢复时另加 run ledger |
 | 一个 blocker | Arbiter 不取平均：单 blocker 可压过多个 approve（对齐 roles.md/workflow.md） |
 
-所有失败都"降级 + 记录"，绝不静默丢角色。
+所有失败都"降级 + 记录"，绝不静默丢角色。成功 redispatch 会移除该角色的 stale gap，但保留
+`run_status.redispatch_attempts` 审计。`maxRedispatchPerRole` 默认 `1`，设为 `0` 可关闭。
 
 ---
 

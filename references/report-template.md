@@ -11,13 +11,20 @@ goal/strategy reviews.
 > ⚠️ **Mode D (single context):** reviewer independence was only partial — all roles ran in one
 > context. Overall confidence is capped at `medium`. Weigh findings accordingly.
 
+<!-- Incomplete/failed/aborted run only: paste this callout before Executive Summary -->
+> **Review incomplete:** `run_status.status` was not `completed` or `completed_with_gaps`, or
+> `safe_to_use_decision` was `false`. Treat any decision below as non-final until the missing phase
+> is rerun or the review is restarted.
+
 ## Executive Summary
 - Target:
 - Decision:            # accept | accept_with_conditions | revise | block | investigate
 - Risk Level:          # critical | high | medium | low
 - Confidence:          # high | medium | low
 - Required Changes:    # count + one-line gist
-- Mode:                # A/B/C/D — add "(independence simulated)" for Mode D
+- Mode:                # A/B/C/C2/D — add "(independence simulated)" for Mode D
+- Run Status:          # completed | completed_with_gaps | incomplete | failed | aborted
+- Safe To Use Decision:# true only when the required decision phase completed
 
 ## Final Decision
 State the decision and the single most important reason for it.
@@ -47,11 +54,32 @@ Why the decision follows from the evidence. Label any arbiter-discovered gaps.
 ## Required Changes
 Changes required before approval (the blockers and their fixes).
 
+## Remediation Plan
+<!-- Conditional: render only when a repairPlan was explicitly produced. Do not invent one. -->
+- Plan ID:
+- Source Decision:
+- Objectives:
+- Steps:
+- Validation:
+- Rollback / Abort:
+- Residual Risks:
+
+## Repair Plan Review
+<!-- Conditional: render only when repairPlanReview was explicitly run. Keep this concise; link or append raw outputs. -->
+- Repair Plan Decision:   # accept | accept_with_conditions | revise | block | investigate
+- Coverage:               # addressed / partial / missing / unverifiable count
+- Top Required Plan Fixes: # top 3, if any
+- Important Residual Risks:
+
+This verdict applies to the repair plan only. It does not change the original target decision or
+prove the target has already been fixed.
+
 ## Optional Improvements
 Non-blocking improvements.
 
 ## Open Questions
-Questions needing user or domain-owner input.
+Questions needing user or domain-owner input. Include any missing role, failed phase, or abandoned
+run state from `run_status` here when the run did not fully complete.
 
 ## Appendix: Raw Agent Outputs
 Per-role YAML. Include on request, or by default for Full / high-stakes reviews. If the combined

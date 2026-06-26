@@ -56,8 +56,17 @@ For finer control, use `permission:` (e.g. `edit: deny`, `bash: { "*": ask, "git
 1. The lead builds the evidence pack and selects roles using `workflow.md`.
 2. The lead calls `adversarial_review` with the evidence, role list, and review size.
 3. The plugin creates isolated reviewer sessions, injects role prompts, collects schema-valid
-   findings, and for Standard/Full runs an independent arbiter by default.
-4. The lead renders the report from `findings`, optional `crossExam`, `arbitration`, and `gaps`.
+   findings, and for Standard/Full runs an independent arbiter by default. Recoverable role/phase
+   failures may be redispatched once in a fresh session.
+4. The lead renders the report from `findings`, optional `crossExam`, `arbitration`, `gaps`, and
+   `run_status`. If `safe_to_use_decision:false`, the report must say the decision is non-final.
+5. If arbitration has non-empty `required_changes` and the user wants a repair plan, the lead calls
+   `adversarial_repair_plan` explicitly. The returned `repairPlan` is a separate artifact, not an
+   arbitration field.
+6. To adversarially review that plan, the lead calls `adversarial_repair_plan_review`. The plugin
+   builds a bounded `target_type: plan` review with `repair_depth: 1` and
+   `allow_repair_planning: false`; accepting the repair plan does not change the original target
+   decision.
 
 C2 gives structural session isolation between reviewers, but reviewer read-only behavior is still a
 soft prompt constraint. It is not a filesystem permission boundary.
@@ -65,6 +74,11 @@ soft prompt constraint. It is not a filesystem permission boundary.
 When `debug:true` is configured in `.opencode/adversarial-team.json`, the plugin writes prompt
 records to `.opencode/adversarial-team-log/`. Use those logs to verify that each reviewer prompt
 contains the evidence pack and role instructions, but not other reviewers' findings.
+
+Optional config `maxRedispatchPerRole` defaults to `1`. Set it to `0` to disable automatic
+redispatch. Redispatch does not alter the evidence pack, selected role, or repair depth; it only
+retries recoverable execution failure in a new isolated session and records the attempt in
+`run_status.redispatch_attempts`.
 
 ## Reference
 

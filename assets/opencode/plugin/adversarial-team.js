@@ -15,6 +15,13 @@ import { createEngine, loadConfig } from "./adversarial-engine.mjs";
 
 const z = tool.schema; // @opencode-ai/plugin 暴露的 zod
 
+function parseJsonArg(name, value, fallback) {
+  if (value == null || value === "") return { ok: true, value: fallback };
+  if (typeof value !== "string") return { ok: true, value };
+  try { return { ok: true, value: JSON.parse(value) }; }
+  catch (e) { return { ok: false, error: `${name} is not valid JSON: ${String(e?.message ?? e)}` }; }
+}
+
 export const AdversarialTeam = async ({ client, directory }) => {
   const cfg = await loadConfig({ directory });
   const engine = createEngine({ client, cfg });
@@ -26,7 +33,8 @@ export const AdversarialTeam = async ({ client, directory }) => {
       description:
         "Adversarial-agent-team Mode C2: fan out Pro/Con/dimension reviewers into isolated " +
         "sessions, collect schema-valid findings, and (for standard/full) run an independent " +
-        "arbiter. Returns JSON { findings, crossExam?, arbitration?, gaps }. Reviewers never see " +
+        "arbiter. Recoverable failures are redispatched once by default. Returns JSON " +
+        "{ findings, crossExam?, arbitration?, gaps, run_status }. Reviewers never see " +
         "each other's output (structural independence). The lead builds the evidence pack and " +
         "selects roles; reviewers are read-only by soft constraint only.",
       args: {
@@ -54,6 +62,64 @@ export const AdversarialTeam = async ({ client, directory }) => {
     }),
   };
 
+
+  tools.adversarial_repair_plan = tool({
+    description:
+      "Adversarial-agent-team Mode C2: create a bounded RemediationPlan from an existing " +
+      "arbitration.required_changes. This is explicit and does not alter the original target " +
+      "decision or place the plan inside arbitration. Returns repairPlan, gaps, and run_status.",
+    args: {
+      evidence: z.string().describe("Serialized original evidence pack."),
+      findings: z.string().describe("JSON string of original Finding[]."),
+      crossExam: z.string().optional().describe("JSON string of original cross-exam block, if any."),
+      arbitration: z.string().describe("JSON string of original arbitration block with required_changes."),
+      gaps: z.string().optional().describe("JSON string of original gaps[], if any."),
+    },
+    async execute({ evidence, findings, crossExam, arbitration, gaps }) {
+      const f = parseJsonArg("findings", findings, []);
+      const cx = parseJsonArg("crossExam", crossExam, undefined);
+      const ar = parseJsonArg("arbitration", arbitration, undefined);
+      const gp = parseJsonArg("gaps", gaps, []);
+      const bad = [f, cx, ar, gp].find((x) => !x.ok);
+      if (bad) return JSON.stringify({ gaps: [{ role: "repair-planner", kind: "error", detail: bad.error }] });
+      const r = await engine.runRepairPlanner({ evidence, findings: f.value, crossExam: cx.value, arbitration: ar.value, gaps: gp.value });
+      return JSON.stringify(r.ok ? { repairPlan: r.repairPlan, gaps: [], run_status: r.run_status } : { gaps: [r.gap], run_status: r.run_status });
+    },
+  });
+
+  tools.adversarial_repair_plan_review = tool({
+    description:
+      "Adversarial-agent-team Mode C2: run one bounded agent-team review over a RemediationPlan. " +
+      "The review uses repair_depth=1 and allow_repair_planning=false; it judges the plan, not " +
+      "whether the original target has already been fixed. Returns run_status and never recurses into planner.",
+    args: {
+      repairPlan: z.string().describe("JSON string of RemediationPlan."),
+      evidence: z.string().describe("Serialized original evidence pack."),
+      findings: z.string().describe("JSON string of original Finding[]."),
+      arbitration: z.string().describe("JSON string of original arbitration block."),
+      roles: z.string().optional().describe("Optional JSON string of role list. Defaults to pro/con/implementation/risk/test."),
+      size: z.enum(["minimal", "standard", "full"]).optional(),
+      crossExam: z.boolean().optional().describe("Run repair-plan cross-examiner. Defaults true for full."),
+    },
+    async execute({ repairPlan, evidence, findings, arbitration, roles, size, crossExam }) {
+      const rp = parseJsonArg("repairPlan", repairPlan, undefined);
+      const f = parseJsonArg("findings", findings, []);
+      const ar = parseJsonArg("arbitration", arbitration, undefined);
+      const rs = parseJsonArg("roles", roles, undefined);
+      const bad = [rp, f, ar, rs].find((x) => !x.ok);
+      if (bad) return JSON.stringify({ gaps: [{ role: "repair-plan-review", kind: "error", detail: bad.error }] });
+      const out = await engine.runRepairPlanReview({
+        repairPlan: rp.value,
+        evidence,
+        findings: f.value,
+        arbitration: ar.value,
+        roles: rs.value,
+        size: size || "standard",
+        crossExam,
+      });
+      return JSON.stringify(out);
+    },
+  });
   // 可选：独立 arbiter 工具（重仲裁，或 Minimal 显式开启）。仅在 independentArbiter 非 false 时注册（D6）。
   if (cfg.independentArbiter === true || cfg.independentArbiter === "auto") {
     tools.adversarial_arbitrate = tool({
@@ -66,12 +132,15 @@ export const AdversarialTeam = async ({ client, directory }) => {
         crossExam: z.string().optional().describe("JSON string of the cross-exam block, if any."),
       },
       async execute({ findings, crossExam }) {
-        let f, cx;
-        try { f = JSON.parse(findings); } catch (e) { return JSON.stringify({ error: "findings is not valid JSON: " + String(e?.message ?? e) }); }
-        if (crossExam) { try { cx = JSON.parse(crossExam); } catch { cx = undefined; } }
-        if (!Array.isArray(f) || f.length === 0) return JSON.stringify({ error: "findings must be a non-empty array" });
-        const r = await engine.runArbiter(f, cx);
-        return JSON.stringify(r.ok ? { arbitration: r.value } : { gaps: [r.gap] });
+        const f = parseJsonArg("findings", findings, undefined);
+        const cx = parseJsonArg("crossExam", crossExam, undefined);
+        const bad = [f, cx].find((x) => !x.ok);
+        if (bad) return JSON.stringify({ gaps: [{ role: "arbiter", kind: "error", detail: bad.error }] });
+        if (!Array.isArray(f.value) || f.value.length === 0) {
+          return JSON.stringify({ gaps: [{ role: "arbiter", kind: "error", detail: "findings must be a non-empty array" }] });
+        }
+        const r = await engine.runArbiter(f.value, cx.value);
+        return JSON.stringify(r.ok ? { arbitration: r.value, gaps: [] } : { gaps: [r.gap] });
       },
     });
   }

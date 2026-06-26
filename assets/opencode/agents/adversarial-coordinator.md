@@ -15,7 +15,7 @@ Steps:
 2. Gather evidence (git diff, files, tests, logs, docs, constraints, success criteria). Bound the
    size: include the highest-risk hunks in full, summarize the rest, and record anything omitted
    under `known_unknowns`.
-3. Choose execution mode (A subagents / B agent teams / C OpenCode / D single-context) and review
+3. Choose execution mode (A subagents / B agent teams / C OpenCode / C2 native team plugin / D single-context) and review
    size (minimal / standard / full). Size by blast radius and reversibility, not diff size.
 4. Select dimension reviewers relevant to the target:
    - code pool: correctness, security, test, architecture, performance, ops, ux-api
@@ -45,7 +45,7 @@ evidence:
   docs:
   links:
 known_unknowns:
-mode: A | B | C | D
+mode: A | B | C | C2 | D
 review_size: minimal | standard | full
 roles_selected:
 ```

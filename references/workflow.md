@@ -101,15 +101,58 @@ The Arbiter weighs evidence, severity, confidence, and reversibility, then decid
 - **Never average opinions.** A single `blocker` can outweigh many approvals.
 - In Mode D, set the report's overall confidence no higher than `medium`.
 
-## Phase 6 — Final Report
+## Phase 6 — Remediation Plan (conditional)
 
-The Scribe renders `report-template.md` with dynamic dimension reviews. Preserve real disagreement;
-do not collapse it into false consensus.
+If the Arbiter decides `accept_with_conditions`, `revise`, `block`, or `investigate` and lists
+`required_changes`, the lead may explicitly produce a `RemediationPlan` before the final report.
+This plan is a separate artifact derived from the arbitration result; it is **not** added to the
+arbitration block, and it does not change the original target decision.
+
+The Repair Planner turns `required_changes` into stable `RC1`, `RC2`, ... items and concrete repair
+steps with validation, rollback/abort guidance, assumptions, verification commands, and residual
+risks. Pure `accept` reviews skip this phase unless the user explicitly asks for a repair plan.
+
+## Phase 7 — Repair Plan Review (conditional, bounded)
+
+When a remediation plan is produced, review that plan as a new `target_type: plan` using the same
+adversarial-agent-team protocol. "Agent-team review" means the protocol, not specifically Claude
+Mode B; the Coordinator still chooses Mode A/B/C/C2/D based on runtime.
+
+The repair-plan evidence pack must include `review_purpose: repair_plan_review`, `repair_depth: 1`,
+`allow_repair_planning: false`, the original required changes, the original arbitration, and the
+remediation plan. Default roles are Pro, Con, `implementation-reviewer`, `risk-reviewer`, and
+`test-reviewer`; add original high-risk dimensions such as security, architecture, or correctness
+when relevant.
+
+This phase is strictly one bounded pass. The repair-plan Arbiter judges whether the plan covers the
+original required changes without introducing new problems. It must not generate a repair-plan of a
+repair-plan. If the repair-plan decision is `revise`, `block`, or `investigate`, the lead reports
+that result; another remediation plan requires an explicit new call.
+
+## Phase 8 — Final Report
+
+The Scribe renders `report-template.md` with dynamic dimension reviews and any supplied
+`repairPlan` / `repairPlanReview`. Preserve real disagreement; do not collapse it into false
+consensus. The Scribe must not invent a remediation plan when none was produced.
 
 ## Robustness (all modes)
 
 - **Invalid YAML from a role:** reject and re-prompt once. If still unparseable, capture the output
-  as a free-text finding flagged `schema_violation` so the Arbiter discounts it.
-- **Empty or runaway role:** the Coordinator retries once, then proceeds and records the missing
-  role under the report's Open Questions / known gaps — never silently drop it.
+  as `schema_violation`. In runtimes that support isolated sessions, the Coordinator may redispatch
+  that same role once in a fresh session.
+- **Empty, runaway, timeout, or transient agent error:** redispatch the affected role or phase in a
+  fresh isolated session when the runtime supports it. Redispatch is bounded (`maxRedispatchPerRole`
+  defaults to `1`) and audited under `run_status.redispatch_attempts`.
+- **Non-recoverable errors:** do not redispatch unknown roles, missing required inputs, invalid
+  repair-plan depth, or `allow_repair_planning:false` recursion guards. Record the gap and mark the
+  run failed or incomplete.
+- **Critical phase incomplete:** if no reviewer findings are produced, or a required arbiter phase
+  does not complete, the report must show `run_status.status: failed|incomplete` and
+  `safe_to_use_decision:false`. Do not present a final decision as trustworthy.
 - **Mode B teammate stalls:** the lead reassigns or proceeds, noting the gap.
+- **Crash / user-abandoned runs:** without a persisted run ledger, the protocol cannot resume from
+  the exact interruption point. Start a new review, or use a runtime-specific ledger if available.
+  Never convert an abandoned run into a completed report.
+
+Redispatch repairs execution failure only; it must not change the evidence pack, selected role, or
+repair depth. A successful redispatch removes the stale gap but keeps the audit trail.

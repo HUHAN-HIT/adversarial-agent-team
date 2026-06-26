@@ -111,6 +111,25 @@ Output: arbitration block.
 
 ---
 
+## Repair Planner (`repair-planner`)
+
+Convert an arbitration result into a bounded remediation plan. This role runs only after Arbitration
+and only when the decision is `accept_with_conditions`, `revise`, `block`, or `investigate` with
+non-empty `required_changes`.
+
+- Do not re-litigate the original target decision.
+- Do not place the plan inside the arbitration block.
+- Derive stable required-change ids `RC1`, `RC2`, ... from `arbitration.required_changes` in order.
+- Address every required change with at least one concrete step.
+- Include validation, rollback/abort guidance, assumptions, verification commands, and residual
+  risks.
+- State clearly that accepting the repair plan does not mean the original target has already been
+  fixed.
+
+Output: remediation-plan block.
+
+---
+
 ## Scribe
 
 Write the final report from `report-template.md`.
@@ -118,6 +137,7 @@ Write the final report from `report-template.md`.
 - List findings by severity; include decision, risk, confidence, required changes, optional
   improvements, and open questions.
 - Generate the Dimension Reviews section dynamically from whatever dimensions ran.
+- Render supplied `repairPlan` and `repairPlanReview` when present; if absent, do not invent them.
 - In Mode D, add the top-of-report callout and cap the report's overall confidence at `medium`.
 
 Output: the rendered report (Markdown).
